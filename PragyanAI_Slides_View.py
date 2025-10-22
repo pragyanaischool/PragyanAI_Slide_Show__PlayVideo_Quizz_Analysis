@@ -176,10 +176,9 @@ with tab3:
     from langchain_community.embeddings import FastEmbedEmbeddings
     from langchain_groq import ChatGroq
     from langchain_core.prompts import ChatPromptTemplate
-    from langchain_core.runnables import RunnablePassthrough
     from langchain_core.output_parsers import StrOutputParser
 
-    # Helper to get Google Slides presentation ID from URL
+    # Helper to extract presentation ID
     def get_presentation_id(slides_url):
         path = urlparse(slides_url).path
         parts = path.split('/')
@@ -189,7 +188,7 @@ with tab3:
                 return parts[idx + 1]
         raise ValueError("Cannot extract Presentation ID from URL.")
 
-    # Extract slide texts via Google Slides API, with robust error handling
+    # Extract slide texts from Google Slides API with error handling
     def extract_slide_texts(slides_url):
         if 'slides_credentials' not in globals() or not globals()['slides_credentials']:
             st.error("Slides API credentials are not available. Cannot extract text.")
@@ -220,21 +219,18 @@ with tab3:
         except HttpError as e:
             if e.resp.status == 400 and "operation is not supported" in str(e).lower():
                 st.error(
-                    "Error extracting slide texts (400 - Operation Not Supported): "
-                    "This document format is not fully supported by the Google Slides API.\n"
-                    "**Please try the following:**\n"
-                    "1. Open the file in Google Slides.\n"
-                    "2. Use `File > Make a copy` to create a native Google Slides document.\n"
-                    "3. Use the new presentation URL here."
+                    "Error extracting slide texts (400 - Operation Not Supported):\n"
+                    "This document type is not supported by the Slides API.\n"
+                    "Try making a native copy via File -> Make a copy, then use that URL."
                 )
             else:
-                st.error(f"Error extracting slide texts (HTTP {e.resp.status}) - check sharing permissions.")
+                st.error(f"Error extracting slide texts (HTTP {e.resp.status}). Check sharing permissions.")
             return []
         except Exception as e:
-            st.error(f"Unexpected error during slide extraction: {e}")
+            st.error(f"Unexpected extraction error: {e}")
             return []
 
-    # Load FAISS vectorstore safely
+    # Load FAISS vectorstore from local directory
     def load_faiss_index():
         try:
             if os.path.exists("faiss_index/index.faiss"):
@@ -257,7 +253,6 @@ with tab3:
 
     st.header("RAG Question Answering based on PPT Slides")
 
-    # Input Google Slides URL, embed presentation
     slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slides_url', ''))
     if slide_url_input:
         current_url = st.session_state.get('slides_url')
@@ -273,10 +268,10 @@ with tab3:
     # Extract slide texts if not loaded
     if slide_url_input and not st.session_state.get('all_slides_texts'):
         with st.spinner("Extracting slide texts..."):
-            all_slides_texts = extract_slide_texts(slide_url_input)
-            st.session_state['all_slides_texts'] = all_slides_texts
+            texts = extract_slide_texts(slide_url_input)
+            st.session_state['all_slides_texts'] = texts
 
-    # Show option to build/load vector DB first
+    # Button to build/load vector DB appears before slide text
     if st.button("Build or Load Vector DB (Required for Q&A)"):
         if not st.session_state.get('all_slides_texts'):
             st.error("Slide texts unavailable. Please enter a valid Google Slides URL.")
@@ -289,26 +284,31 @@ with tab3:
                 st.session_state['faiss_ready'] = True
                 st.success("Vector DB built and saved.")
 
-    # Load vector DB from disk if not already loaded
-    if not st.session_state.get('faiss_ready'):
+    # Load vector DB from disk if not loaded
+    if not st.session_state.get('faiss_ready', False):
         if os.path.exists("faiss_index/index.faiss"):
             st.session_state['faiss_ready'] = True
             st.success("Loaded Vector DB from disk.")
 
-    # Slide number input to select slide for context window
     all_slides_texts = st.session_state.get('all_slides_texts', [])
+    # Slide number input for context window
     if all_slides_texts:
-        slide_num = st.number_input("Select slide number for Q&A context window", min_value=1, max_value=len(all_slides_texts), value=1)
+        slide_num = st.number_input(
+            "Select slide number to base context on",
+            min_value=1,
+            max_value=len(all_slides_texts),
+            value=1
+        )
         slide_idx = slide_num - 1
         indices = [slide_idx]
         if slide_idx > 0:
-            indices.append(slide_idx - 1)
+            indices.append(slide_idx -1)
         if slide_idx < len(all_slides_texts) -1:
-            indices.append(slide_idx + 1)
+            indices.append(slide_idx +1)
         indices = sorted(indices)
         context_slides = [all_slides_texts[i] for i in indices]
         combined_context = "\n\n".join(context_slides)
-        st.subheader(f"Showing content from Slide {slide_num} and adjacent slides")
+        st.subheader(f"Context from Slide {slide_num} and adjacent slides")
         st.write(combined_context)
     else:
         combined_context = ""
@@ -316,20 +316,17 @@ with tab3:
 
     # Question input and answer generation
     if st.session_state.get('faiss_ready', False):
-        question = st.text_area("Ask a question based on current and neighboring slides")
+        question = st.text_area("Ask a question based on the selected slides")
         if st.button("Get Answer"):
             if not question.strip():
                 st.warning("Please enter a question.")
             elif not combined_context.strip():
-                st.warning("Selected slide context is empty.")
+                st.warning("No context available for selected slides.")
             else:
                 with st.spinner("Generating answer..."):
-                    vectorstore = load_faiss_index()
-                    if not vectorstore:
-                        st.error("Vector DB failed to load. Try rebuilding.")
-                    else:
-                        prompt_template = """
-You are an expert tutor. Use the following context, which includes the selected slide and its adjacent slides, to answer the question clearly and simply for students.
+                    llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+                    prompt_template = """
+You are an expert tutor. Use the following context (selected slide and neighbors) to answer clearly and simply:
 
 Context:
 {context}
@@ -337,25 +334,25 @@ Context:
 Question:
 {question}
 
-Answer with clarity and simplicity:
+Provide a clear answer:
 """
-                        prompt = ChatPromptTemplate.from_template(prompt_template)
-                        llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+                    prompt = ChatPromptTemplate.from_template(prompt_template)
+                    input_text = prompt.format(context=combined_context, question=question)
 
-                        # Compose a chain that directly uses provided context and question
-                        chain = llm | StrOutputParser()
+                    # Groq expects list of chat messages or string depending on version:
+                    # First try as string input
+                    try:
+                        answer = llm.invoke(input_text)
+                    except Exception:
+                        # Fallback: invoke with chat message format
+                        answer = llm.invoke([{"role": "user", "content": input_text}])
 
-                        answer = chain.invoke({
-                            "context": combined_context,
-                            "question": question
-                        })
+                    if 'chat_logs' not in st.session_state:
+                        st.session_state['chat_logs'] = []
+                    st.session_state['chat_logs'].append({"question": question, "answer": answer})
 
-                        if 'chat_logs' not in st.session_state:
-                            st.session_state['chat_logs'] = []
-                        st.session_state['chat_logs'].append({"question": question, "answer": answer})
-
-                        st.markdown(f"**Q:** {question}")
-                        st.markdown(f"**A:** {answer}")
+                    st.markdown(f"**Q:** {question}")
+                    st.markdown(f"**A:** {answer}")
 
     # Display chat history
     if 'chat_logs' in st.session_state and st.session_state['chat_logs']:

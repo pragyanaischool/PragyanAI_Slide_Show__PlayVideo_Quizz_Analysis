@@ -4,7 +4,8 @@ sqlite3  # builtin, no install needed
 gspread
 oauth2client
 requests
-langchain_groq
+langchain
+langchain-groq
 langchain_community
 langchain_core
 streamlit_player

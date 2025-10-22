@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import requests
-import json
 from google.oauth2.service_account import Credentials
 import gspread
 from langchain_groq import ChatGroq
@@ -12,9 +11,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-# --- Streamlit Secrets JSON Access ---
-credentials_info = st.secrets["google_service_account"]
-credentials = Credentials.from_service_account_info(credentials_info)
+# --- Fix multiline private_key from secrets ---
+creds_dict = dict(st.secrets["google_service_account"])
+creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
+credentials = Credentials.from_service_account_info(creds_dict)
 gc = gspread.authorize(credentials)
 
 # ----- Config -----
@@ -45,7 +45,7 @@ with tab1:
         try:
             from streamlit_player import st_player
             st_player(video_url)
-        except:
+        except Exception:
             st.video(video_url)
 
 # --- Tab 2: Quiz ---
@@ -60,65 +60,65 @@ with tab2:
         q_df = quiz_df[quiz_df['quiz_name'] == selected_quiz]
 
         correct, wrong = 0, 0
+        student_name = st.text_input("Student Name", key='student')
         for idx, q in q_df.iterrows():
             st.write(f"Q{idx+1}: {q['Question']}")
-            options = [q[f'Option {c}'] for c in 'ABCDE' if q[f'Option {c}']]
+            options = [q[f'Option {c}'] for c in 'ABCDE' if q.get(f'Option {c}', None)]
             answer = st.radio("Your answer:", options, key=f"q{idx}")
-            if st.button("Submit", key=f"sub{idx}"):
+            if st.button(f"Submit Question {idx+1}", key=f"sub{idx}"):
                 selected_opt = answer
                 correct_answer = q['Answer']
                 if selected_opt == correct_answer:
                     st.success("Correct!")
                     correct += 1
                 else:
-                    st.error(f"Wrong! Correct: {correct_answer}")
+                    st.error(f"Wrong! Correct answer: {correct_answer}")
                     wrong += 1
-                student_name = st.text_input("Student Name", key='student')
-                if st.button("Save Results"):
-                    c.execute('INSERT INTO performance VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)',
-                              (student_name, selected_quiz, correct, wrong))
-                    conn.commit()
+        if st.button("Save Results") and student_name:
+            c.execute('INSERT INTO performance (student, quiz_name, correct, wrong) VALUES (?, ?, ?, ?)',
+                      (student_name, selected_quiz, correct, wrong))
+            conn.commit()
+            st.success("Results saved!")
+
         st.write(f"Score: {correct}/{len(q_df)}")
     except Exception as e:
-        st.error(str(e))
+        st.error(f"Error loading quiz: {e}")
 
 # --- Tab 3: RAG with GROQ + FastEmbed ---
 with tab3:
-    st.header("Ask Question (RAG with GROQ+FastEmbed)")
+    st.header("Ask Question (RAG with GROQ + FastEmbed)")
 
     slide_number = st.number_input("Slide number for context", min_value=1, step=1)
     question_text = st.text_area("Your Question")
 
     if st.button("Get Answer"):
-        # Load vectorstore with FastEmbed embeddings
-        vectorstore = FAISS.load_local("faiss_index", FastEmbedEmbeddings())
-        retriever = vectorstore.as_retriever()
+        try:
+            vectorstore = FAISS.load_local("faiss_index", FastEmbedEmbeddings())
+            retriever = vectorstore.as_retriever()
 
-        # Define the prompt template
-        template = """
-        Use the following pieces of context to answer the question at the end.
-        If you don't know the answer, just say that you don't know, don't try to make up an answer.
-        {context}
-        Question: {question}
-        """
-        prompt = ChatPromptTemplate.from_template(template)
+            template = """
+            Use the following pieces of context to answer the question at the end.
+            If you don't know the answer, just say that you don't know, don't try to make up an answer.
+            {context}
+            Question: {question}
+            """
+            prompt = ChatPromptTemplate.from_template(template)
 
-        # Initialize GROQ Llama
-        llm = ChatGroq(temperature=0, model_name="llama3-8b-8192")
+            llm = ChatGroq(temperature=0, model_name="llama3-8b-8192")
 
-        # Compose the RAG chain
-        rag_chain = (
-            {"context": retriever, "question": RunnablePassthrough()}
-            | prompt
-            | llm
-            | StrOutputParser()
-        )
+            rag_chain = (
+                {"context": retriever, "question": RunnablePassthrough()}
+                | prompt
+                | llm
+                | StrOutputParser()
+            )
 
-        # Run the chain with inputs
-        answer = rag_chain.invoke({"context": question_text, "question": question_text})
-        st.write("Answer:", answer)
+            answer = rag_chain.invoke({"context": question_text, "question": question_text})
+            st.write("Answer:", answer)
+        except Exception as e:
+            st.error(f"Error in RAG answer: {e}")
 
-# --- Tab 4: Search Web & YouTube ---
+# --- Tab 4: Web & YouTube Search ---
 with tab4:
     st.header("Web & YouTube Search")
     query = st.text_input("Search Topic")
@@ -143,4 +143,3 @@ with tab4:
                     st_player(f"https://www.youtube.com/watch?v={vid_id}")
         else:
             st.error("YouTube search failed")
-            

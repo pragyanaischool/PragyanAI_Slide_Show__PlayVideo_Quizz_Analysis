@@ -2,8 +2,8 @@ streamlit
 pandas
 groq
 llama-index
-gspread==5.7.2
-oauth2client==4.1.3
-requests==2.31.0
-streamlit-player==0.7.4
+gspread
+oauth2client
+requests
+streamlit-player
 sqlite3  # Note: built in with Python, do not install separately

@@ -168,7 +168,6 @@ with tab2:
 # --- Tab 3: RAG Ask ---
 import os
 
-# Helper to load FAISS index with safety
 def load_faiss_index():
     return FAISS.load_local(
         "faiss_index",
@@ -176,69 +175,73 @@ def load_faiss_index():
         allow_dangerous_deserialization=True
     )
 
-# Function to extract slide text from Google Slides (placeholder)
 def extract_slide_texts(slides_url):
-    # Implement real extraction via Google Slides API for production
-    # For demo, dummy slide texts
+    # Placeholder for real extraction using Slides API
+    # Demo slide texts for example
     return [
         "Slide 1: Introduction to Deep Learning. Neural networks are inspired by the human brain.",
         "Slide 2: Convolutional Neural Networks (CNNs) are used in image recognition.",
         "Slide 3: Recurrent Neural Networks handle sequential data like language.",
-        # Add more slides here...
     ]
 
 with tab3:
     st.header("RAG Question Answering based on PPT Slides")
 
-    slide_num = st.number_input("Enter slide number (to reference)", min_value=1, max_value=100)
-    question = st.text_area("Ask your question about slide content")
-
-    slide_url_input = st.text_input(
-        "Enter PPT Slides URL for reference",
-        value=st.session_state.get('slide_url', '')
-    )
-
+    # 1. Provide PPT URL and embed presentation
+    slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slide_url', ''))
     if slide_url_input:
         st.session_state['slide_url'] = slide_url_input
-
-    # Display the embedded slide deck like Tab 1
-    if slide_url_input:
         embed_url = slide_url_input.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
         st.components.v1.iframe(embed_url, height=480)
     else:
-        st.info("Enter the Google Slides URL above to embed the presentation here.")
+        st.info("Please enter Google Slides URL to embed presentation.")
 
-    # Show selected slide text content
-    selected_slide_text = ""
-    if slide_url_input:
+    # 2. Load / Build Vector DB button
+    build_db = st.button("Build or Load Vector DB from Presentation Content")
+    if build_db and slide_url_input:
+        st.info("Extracting slide texts and building vector DB (this may take a moment)...")
         all_slides_texts = extract_slide_texts(slide_url_input)
+        vectorstore = FAISS.from_texts(all_slides_texts, FastEmbedEmbeddings())
+        vectorstore.save_local("faiss_index")
+        st.success("Vector DB built and saved successfully.")
+        st.session_state['faiss_ready'] = True
+        st.session_state['all_slides_texts'] = all_slides_texts
+
+    # Load vector DB if already built
+    faiss_ready = st.session_state.get('faiss_ready', False)
+    if not faiss_ready:
+        if os.path.exists("faiss_index/index.faiss"):
+            st.session_state['faiss_ready'] = True
+            st.session_state['all_slides_texts'] = extract_slide_texts(slide_url_input)
+            st.success("FAISS vectorstore loaded from disk.")
+        else:
+            st.warning("Vector DB is not built yet. Please build it using the button above.")
+
+    # 3. Select Slide Number
+    all_slides_texts = st.session_state.get('all_slides_texts', [])
+    total_slides = len(all_slides_texts)
+    if faiss_ready and total_slides > 0:
+        slide_num = st.number_input("Select slide number to refer to", min_value=1, max_value=total_slides)
+
         slide_idx = slide_num - 1
-        if 0 <= slide_idx < len(all_slides_texts):
-            selected_slide_text = all_slides_texts[slide_idx]
-            st.subheader(f"Content of Slide {slide_num}")
-            st.text_area("Slide content as reference", value=selected_slide_text, height=180)
-        else:
-            st.warning("Slide number exceeds total slides or invalid.")
+        selected_slide_text = all_slides_texts[slide_idx]
 
-    # RAG Q&A logic
-    if st.button("Ask on Selected Slide Content"):
-        if not question.strip():
-            st.warning("Please enter a question.")
-        elif not selected_slide_text:
-            st.warning("Select a valid slide number and ensure slide content is loaded.")
-        else:
-            try:
-                # Load or build FAISS index from full slide texts
-                if os.path.exists("faiss_index/index.faiss"):
+        # 4. Show slide text box
+        st.subheader(f"Content of Slide {slide_num}")
+        st.text_area("Slide Text Content", value=selected_slide_text, height=180)
+
+        # 5. Ask question and get answer
+        question = st.text_area("Ask a question about this slide")
+
+        if st.button("Get Answer"):
+            if not question.strip():
+                st.warning("Please enter a question.")
+            else:
+                try:
                     vectorstore = load_faiss_index()
-                else:
-                    # Build index on all slide texts
-                    vectorstore = FAISS.from_texts(all_slides_texts, FastEmbedEmbeddings())
-                    vectorstore.save_local("faiss_index")
+                    retriever = vectorstore.as_retriever()
 
-                retriever = vectorstore.as_retriever()
-
-                prompt_template = """
+                    prompt_template = """
 You are an expert explaining concepts based on the following slide content.
 Use the context to answer the question clearly and simply.
 
@@ -250,38 +253,40 @@ Question:
 
 Explain in an understandable way suitable for students.
 """
-                prompt = ChatPromptTemplate.from_template(prompt_template)
-                llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+                    prompt = ChatPromptTemplate.from_template(prompt_template)
+                    llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
 
-                chain = (
-                    {"context": retriever, "question": RunnablePassthrough()}
-                    | prompt
-                    | llm
-                    | StrOutputParser()
-                )
+                    chain = (
+                        {"context": retriever, "question": RunnablePassthrough()}
+                        | prompt
+                        | llm
+                        | StrOutputParser()
+                    )
 
-                answer = chain.invoke({
-                    "context": selected_slide_text,
-                    "question": question
-                })
+                    answer = chain.invoke({
+                        "context": selected_slide_text,
+                        "question": question
+                    })
 
-                # Store chat history in session state
-                if 'chat_logs' not in st.session_state:
-                    st.session_state['chat_logs'] = []
-                st.session_state['chat_logs'].append({"question": question, "answer": answer})
+                    # Save Q&A to chat history
+                    if 'chat_logs' not in st.session_state:
+                        st.session_state['chat_logs'] = []
+                    st.session_state['chat_logs'].append({"question": question, "answer": answer})
 
-                st.markdown(f"**Q:** {question}")
-                st.markdown(f"**A:** {answer}")
+                    st.markdown(f"**Q:** {question}")
+                    st.markdown(f"**A:** {answer}")
 
-            except Exception as e:
-                st.error(f"Error in RAG processing: {e}")
+                except Exception as e:
+                    st.error(f"Error in RAG processing: {e}")
 
-    # Render chat history (most recent first)
-    if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
-        st.subheader("Previous Questions and Answers")
-        for entry in reversed(st.session_state['chat_logs']):
-            st.markdown(f"**Q:** {entry['question']}")
-            st.markdown(f"**A:** {entry['answer']}")
+        # 6. Display chat history
+        if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
+            st.subheader("Previous Questions and Answers")
+            for entry in reversed(st.session_state['chat_logs']):
+                st.markdown(f"**Q:** {entry['question']}")
+                st.markdown(f"**A:** {entry['answer']}")
+    else:
+        st.info("Build the vector DB and ensure slides are loaded first.")
 
 # --- Tab 4: Web & YouTube Search ---
 with tab4:

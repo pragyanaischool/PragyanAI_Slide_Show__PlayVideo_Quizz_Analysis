@@ -166,59 +166,59 @@ with tab2:
             st.error(f"Failed to load quiz: {e}")
 
 # --- Tab 3: RAG Ask ---
-import os
-from urllib.parse import urlparse
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
-
-def get_presentation_id(slides_url):
-    path = urlparse(slides_url).path
-    parts = path.split('/')
-    if "d" in parts:
-        idx = parts.index("d")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
-    raise ValueError("Cannot extract Presentation ID from URL.")
-
-def extract_slide_texts(slides_url):
-    try:
-        presentation_id = get_presentation_id(slides_url)
-        creds_dict = dict(st.secrets["google_service_account"])
-        creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
-        scopes = ["https://www.googleapis.com/auth/presentations.readonly"]
-        credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        service = build('slides', 'v1', credentials=credentials)
-        presentation = service.presentations().get(presentationId=presentation_id).execute()
-        slides = presentation.get('slides', [])
-        slide_texts = []
-        for slide in slides:
-            slide_text = []
-            for element in slide.get('pageElements', []):
-                shape = element.get('shape')
-                if shape and 'text' in shape:
-                    for te in shape['text'].get('textElements', []):
-                        if 'textRun' in te:
-                            content = te['textRun'].get('content')
-                            if content:
-                                slide_text.append(content)
-            slide_content = ''.join(slide_text).strip()
-            slide_texts.append(slide_content)
-        return slide_texts
-    except Exception as e:
-        st.error(f"Error extracting slide texts: {e}")
-        return []
-
-def load_faiss_index():
-    return FAISS.load_local(
-        "faiss_index",
-        FastEmbedEmbeddings(),
-        allow_dangerous_deserialization=True
-    )
-
 with tab3:
+    import os
+    from urllib.parse import urlparse
+    from googleapiclient.discovery import build
+    from google.oauth2 import service_account
+
+    def get_presentation_id(slides_url):
+        path = urlparse(slides_url).path
+        parts = path.split('/')
+        if "d" in parts:
+            idx = parts.index("d")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        raise ValueError("Cannot extract Presentation ID from URL.")
+
+    def extract_slide_texts(slides_url):
+        try:
+            presentation_id = get_presentation_id(slides_url)
+            creds_dict = dict(st.secrets["google_service_account"])
+            creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
+            scopes = ["https://www.googleapis.com/auth/presentations.readonly"]
+            credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            service = build('slides', 'v1', credentials=credentials)
+            presentation = service.presentations().get(presentationId=presentation_id).execute()
+            slides = presentation.get('slides', [])
+            slide_texts = []
+            for slide in slides:
+                slide_text = []
+                for element in slide.get('pageElements', []):
+                    shape = element.get('shape')
+                    if shape and 'text' in shape:
+                        for te in shape['text'].get('textElements', []):
+                            if 'textRun' in te:
+                                content = te['textRun'].get('content')
+                                if content:
+                                    slide_text.append(content)
+                slide_content = ''.join(slide_text).strip()
+                slide_texts.append(slide_content)
+            return slide_texts
+        except Exception as e:
+            st.error(f"Error extracting slide texts: {e}")
+            return []
+
+    def load_faiss_index():
+        return FAISS.load_local(
+            "faiss_index",
+            FastEmbedEmbeddings(),
+            allow_dangerous_deserialization=True
+        )
+
     st.header("RAG Question Answering based on PPT Slides")
 
-    # Input for slides URL and embed all slides
+    # Input for Google Slides URL and embed presentation
     slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slides_url', ''))
     if slide_url_input:
         st.session_state['slides_url'] = slide_url_input
@@ -227,7 +227,7 @@ with tab3:
     else:
         st.info("Please enter Google Slides URL to embed presentation.")
 
-    # Extract and display slide texts
+    # Extract and show slide texts
     if slide_url_input:
         with st.spinner("Extracting slide texts..."):
             all_slides_texts = extract_slide_texts(slide_url_input)
@@ -240,12 +240,12 @@ with tab3:
         else:
             st.warning("No slide text content extracted.")
 
-    # Build or load vector DB
+    # Button to build/load vector DB
     if st.button("Build or Load Vector DB (Required for Q&A)"):
         if 'all_slides_texts' not in st.session_state or not st.session_state['all_slides_texts']:
             st.error("Slide texts not available. Please enter a valid Google Slides URL.")
         else:
-            st.info("Building vector DB from all slide texts...")
+            st.info("Building vector DB from slide texts...")
             vectorstore = FAISS.from_texts(st.session_state['all_slides_texts'], FastEmbedEmbeddings())
             vectorstore.save_local("faiss_index")
             st.success("Vector DB built and saved.")
@@ -257,7 +257,7 @@ with tab3:
             st.session_state['faiss_ready'] = True
             st.success("Loaded Vector DB from disk.")
 
-    # Question input and RAG answer display
+    # Question input and answer output
     if faiss_ready:
         question = st.text_area("Ask a question based on the presentation slides")
         if st.button("Get Answer"):
@@ -290,7 +290,7 @@ Answer with clarity for students.
 
                     answer = chain.invoke({"context": question, "question": question})
 
-                    # Append to chat history in session
+                    # Append chat to session state history
                     if 'chat_logs' not in st.session_state:
                         st.session_state['chat_logs'] = []
                     st.session_state['chat_logs'].append({"question": question, "answer": answer})
@@ -302,7 +302,7 @@ Answer with clarity for students.
                     st.error(f"Error during RAG processing: {e}")
 
     # Chat history display
-    if 'chat_logs' in st.session_state:
+    if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
         st.subheader("Previous Questions and Answers")
         for chat in reversed(st.session_state['chat_logs']):
             st.markdown(f"**Q:** {chat['question']}")

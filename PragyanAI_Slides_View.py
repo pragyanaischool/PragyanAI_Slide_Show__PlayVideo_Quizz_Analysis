@@ -77,6 +77,15 @@ with tab1:
         st.info("Please submit the video URL in the Configuration tab.")
 
 # --- Tab 2: Quiz ---
+def safe_rerun():
+    import streamlit as st
+    try:
+        st.experimental_rerun()
+    except AttributeError:
+        from streamlit.runtime.scriptrunner import RerunException
+        from streamlit.runtime.scriptrunner import add_script_run_ctx
+        raise RerunException(add_script_run_ctx())
+
 with tab2:
     st.header("Quiz from Google Sheets")
     quiz_sheet_url = st.session_state.get('quiz_sheet_url')
@@ -85,7 +94,6 @@ with tab2:
         st.info("Please submit a Google Quiz Sheet URL in the Configuration tab.")
     else:
         try:
-            # Open Google Sheet and get list of worksheets
             sh = gc.open_by_url(quiz_sheet_url)
             sheet_names = [ws.title for ws in sh.worksheets()]
             selected_sheet = st.selectbox("Select Quiz Sheet", sheet_names)
@@ -98,7 +106,6 @@ with tab2:
             if total_questions == 0:
                 st.warning("Selected quiz sheet is empty.")
             else:
-                # Initialize session state variables
                 if 'question_index' not in st.session_state:
                     st.session_state['question_index'] = 0
                 if 'answer_submitted' not in st.session_state:
@@ -111,7 +118,6 @@ with tab2:
                 st.write(f"Question {q_idx + 1} of {total_questions}:")
                 st.write(question['Questions'])
 
-                # Gather options
                 options = [question.get(f'Option {c}') for c in ['A','B','C','D','E'] if question.get(f'Option {c}')]
                 
                 if not st.session_state['answer_submitted']:
@@ -120,7 +126,7 @@ with tab2:
                     if submit:
                         st.session_state['user_answer'] = user_answer
                         st.session_state['answer_submitted'] = True
-                        st.experimental_rerun()
+                        safe_rerun()
                 else:
                     correct_answer = question['Answer']
                     if st.session_state['user_answer'] == correct_answer:
@@ -130,22 +136,21 @@ with tab2:
 
                     st.markdown(f"**Explanation:** {question.get('Explanation', 'No explanation provided.')}")
 
-                    # Navigation buttons
                     if q_idx + 1 < total_questions:
                         if st.button("Next Question"):
                             st.session_state['question_index'] += 1
                             st.session_state['answer_submitted'] = False
                             st.session_state['user_answer'] = None
-                            st.experimental_rerun()
+                            safe_rerun()
                     else:
                         st.success("You have completed the quiz!")
                         if st.button("Restart Quiz"):
                             st.session_state['question_index'] = 0
                             st.session_state['answer_submitted'] = False
                             st.session_state['user_answer'] = None
-                            st.experimental_rerun()
+                            safe_rerun()
 
-                # Optional: Save quiz performance on demand
+                # Optional: Save performance
                 student_name = st.text_input("Student Name")
                 if st.button("Save Quiz Performance") and student_name:
                     correct_count = sum(quiz_df['Answer'] == st.session_state.get('user_answer'))

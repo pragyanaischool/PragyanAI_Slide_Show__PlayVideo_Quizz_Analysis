@@ -1,8 +1,12 @@
 streamlit
 pandas
-groq
-llama-index
+sqlite3  # builtin, no install needed
 gspread
 oauth2client
 requests
-streamlit-player
+langchain_groq
+langchain_community
+langchain_core
+streamlit_player
+faiss-cpu  # or faiss-gpu if applicable
+

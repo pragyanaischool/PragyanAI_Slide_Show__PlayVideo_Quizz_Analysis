@@ -369,189 +369,155 @@ Answer clearly for students:
             st.markdown(f"**Q:** {chat['question']}")
             st.markdown(f"**A:** {chat['answer']}")
 
-'''
-with tab3:
-    import os
-    from urllib.parse import urlparse
-    from googleapiclient.discovery import build
-    from google.oauth2 import service_account
-    from googleapiclient.errors import HttpError
 
-    def get_presentation_id(slides_url):
-        path = urlparse(slides_url).path
-        parts = path.split('/')
-        if "d" in parts:
-            idx = parts.index("d")
-            if idx + 1 < len(parts):
-                return parts[idx + 1]
-        raise ValueError("Cannot extract Presentation ID from URL.")
-
-    def extract_slide_texts(slides_url):
-        if 'slides_credentials' not in globals() or not globals()['slides_credentials']:
-            st.error("Slides API credentials are not available. Cannot extract text.")
-            return []
-        try:
-            presentation_id = get_presentation_id(slides_url)
-            service = build('slides', 'v1', credentials=globals()['slides_credentials'])
-            presentation = service.presentations().get(presentationId=presentation_id).execute()
-            slides = presentation.get('slides', [])
-            slide_texts = []
-            for slide in slides:
-                slide_text_parts = []
-                for element in slide.get('pageElements', []):
-                    shape = element.get('shape')
-                    if shape and 'text' in shape:
-                        text_content = ""
-                        for te in shape['text'].get('textElements', []):
-                            if 'textRun' in te:
-                                content = te['textRun'].get('content')
-                                if content:
-                                    text_content += content.strip() + " "
-                        if text_content:
-                            slide_text_parts.append(text_content.strip())
-                slide_content = " ".join(slide_text_parts).strip()
-                if slide_content:
-                    slide_texts.append(slide_content)
-            return slide_texts
-        except HttpError as e:
-            if e.resp.status == 400 and "operation is not supported" in str(e).lower():
-                st.error(
-                    "Error extracting slide texts (400 - Operation Not Supported): "
-                    "This document format is not fully supported by the Google Slides API.\n"
-                    "**Please try the following:**\n"
-                    "1. Open the file in Google Slides.\n"
-                    "2. Use `File > Make a copy` to create a native Google Slides document.\n"
-                    "3. Use the new presentation URL here."
-                )
-            else:
-                st.error(f"Error extracting slide texts (HTTP {e.resp.status}) - check sharing permissions.")
-            return []
-        except Exception as e:
-            st.error(f"Unexpected error during slide extraction: {e}")
-            return []
-
-    def load_faiss_index():
-        try:
-            if os.path.exists("faiss_index/index.faiss"):
-                return FAISS.load_local(
-                    "faiss_index",
-                    FastEmbedEmbeddings(),
-                    allow_dangerous_deserialization=True
-                )
-            return None
-        except Exception as e:
-            st.error(f"Error loading FAISS index: {e}")
-            return None
-
-    # Initialize credentials globally if missing
-    if 'slides_credentials' not in globals() or not globals()['slides_credentials']:
-        creds_dict = dict(st.secrets["google_service_account"])
-        creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
-        scopes = ["https://www.googleapis.com/auth/presentations.readonly"]
-        globals()['slides_credentials'] = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
-
-    st.header("RAG Question Answering based on PPT Slides")
-
-    slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slides_url', ''))
-    if slide_url_input:
-        current_slide_url = st.session_state.get('slides_url')
-        if current_slide_url != slide_url_input:
-            st.session_state['slides_url'] = slide_url_input
-            st.session_state['all_slides_texts'] = []
-            st.session_state['faiss_ready'] = False
-        embed_url = slide_url_input.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
-        st.components.v1.iframe(embed_url, height=480)
-    else:
-        st.info("Please enter Google Slides URL to embed presentation.")
-
-    # Build or load Vector DB button **before** showing slide content
-    if st.button("Build or Load Vector DB (Required for Q&A)"):
-        if 'all_slides_texts' not in st.session_state or not st.session_state['all_slides_texts']:
-            with st.spinner("Extracting slide texts first..."):
-                all_slides_texts = extract_slide_texts(st.session_state['slides_url'])
-                st.session_state['all_slides_texts'] = all_slides_texts
-            if not st.session_state['all_slides_texts']:
-                st.error("No slide texts extracted. Cannot build vector DB.")
-                st.stop()
-
-        with st.spinner("Building vector DB from all slides..."):
-            vectorstore = FAISS.from_texts(st.session_state['all_slides_texts'], FastEmbedEmbeddings())
-            if not os.path.exists("faiss_index"):
-                os.makedirs("faiss_index")
-            vectorstore.save_local("faiss_index")
-            st.session_state['faiss_ready'] = True
-            st.success("Vector DB built and saved.")
-
-    if not st.session_state.get('faiss_ready', False):
-        if os.path.exists("faiss_index/index.faiss"):
-            st.session_state['faiss_ready'] = True
-            st.success("Loaded vector DB from disk.")
-
-    # Choose slide number to display text
-    all_slides_texts = st.session_state.get('all_slides_texts', [])
-    if all_slides_texts:
-        slide_num = st.number_input("Enter slide number to view text", min_value=1, max_value=len(all_slides_texts))
-        selected_text = all_slides_texts[slide_num - 1]
-        st.subheader(f"Content of Slide {slide_num}")
-        st.write(selected_text)
-
-    else:
-        st.info("Slide text content not loaded yet.")
-
-    # Question input and answer output
-    if st.session_state.get('faiss_ready', False):
-        st.markdown("---")
-        question = st.text_area("Ask a question based on the presentation slides")
-        if st.button("Get Answer"):
-            if not question.strip():
-                st.warning("Please enter a question.")
-            else:
-                with st.spinner("Retrieving context and generating answer..."):
-                    vectorstore = load_faiss_index()
-                    if not vectorstore:
-                        st.error("Vector DB failed to load. Try rebuilding.")
-                    else:
-                        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                        prompt_template = """
-You are an expert tutor. Use retrieved slide context to answer clearly and simply:
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer with clarity and simplicity:
-"""
-                        prompt = ChatPromptTemplate.from_template(prompt_template)
-                        llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
-
-                        chain = (
-                            {"context": retriever, "question": RunnablePassthrough()}
-                            | prompt
-                            | llm
-                            | StrOutputParser()
-                        )
-
-                        answer = chain.invoke(question)
-
-                        if 'chat_logs' not in st.session_state:
-                            st.session_state['chat_logs'] = []
-                        st.session_state['chat_logs'].append({"question": question, "answer": answer})
-
-                        st.markdown(f"**Q:** {question}")
-                        st.markdown(f"**A:** {answer}")
-
-    # Display previous Q&A history
-    if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
-        st.subheader("Previous Questions and Answers")
-        for chat in reversed(st.session_state['chat_logs']):
-            st.markdown(f"**Q:** {chat['question']}")
-            st.markdown(f"**A:** {chat['answer']}")
-
-'''
 # --- Tab 4: Web & YouTube Search ---
 with tab4:
+    import streamlit as st
+import gspread
+import requests
+from streamlit_player import st_player
+
+# Assume gc is your authorized gspread client from credentials (reuse from your app)
+gc = gspread.authorize(credentials)  # credentials loaded as per your dev environment
+
+def get_website_list(sheet_url):
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet("websites")  # Change to exact sheet name if needed (case-sensitive)
+    sites = ws.col_values(1)
+    # Clean list and exclude header
+    return [s.strip() for s in sites if s.strip() and not s.lower().startswith("website")]
+
+def get_youtube_channels(sheet_url):
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet("youtube")
+    channels = ws.col_values(1)
+    return [c.strip() for c in channels if c.strip() and not c.lower().startswith("channel")]
+
+def serpapi_site_search(query, site, api_key):
+    search_query = f"site:{site} {query}"
+    params = {"q": search_query, "api_key": api_key}
+    url = "https://serpapi.com/search.json"
+    res = requests.get(url, params=params)
+    if res.ok:
+        return res.json().get("organic_results", [])
+    else:
+        st.error(f"SerpAPI site search failed for {site}: {res.text}")
+        return []
+
+def serpapi_general_search(query, api_key):
+    params = {"q": query, "api_key": api_key}
+    res = requests.get("https://serpapi.com/search.json", params=params)
+    if res.ok:
+        return res.json().get("organic_results", [])
+    else:
+        st.error(f"SerpAPI general search failed: {res.text}")
+        return []
+
+def youtube_search_channel(query, channel_id, youtube_api_key):
+    params = {
+        "part": "snippet",
+        "channelId": channel_id,
+        "q": query,
+        "maxResults": 5,
+        "order": "relevance",
+        "type": "video",
+        "key": youtube_api_key
+    }
+    res = requests.get("https://www.googleapis.com/youtube/v3/search", params=params)
+    if res.ok:
+        return res.json().get("items", [])
+    else:
+        st.error(f"YouTube search failed for channel {channel_id}: {res.text}")
+        return []
+
+def youtube_general_search(query, youtube_api_key):
+    params = {
+        "part": "snippet",
+        "q": query,
+        "maxResults": 5,
+        "order": "relevance",
+        "type": "video",
+        "key": youtube_api_key
+    }
+    res = requests.get("https://www.googleapis.com/youtube/v3/search", params=params)
+    if res.ok:
+        return res.json().get("items", [])
+    else:
+        st.error(f"YouTube general search failed: {res.text}")
+        return []
+
+with tab4:
+    st.header("Web and YouTube Search for Students")
+
+    sheet_url = st.text_input("Enter Google Sheet URL with Website and YouTube Channels data",
+                              value=st.session_state.get('quiz_sheet_url', ''))
+    topic = st.text_input("Enter topic or keyword to search")
+
+    if st.button("Search All"):
+        if not sheet_url or not topic:
+            st.warning("Please enter both Sheet URL and search topic.")
+        else:
+            # Load lists once
+            with st.spinner("Loading websites and channels from sheet..."):
+                websites = get_website_list(sheet_url)
+                youtube_channels = get_youtube_channels(sheet_url)
+
+            serpapi_key = st.secrets.get("SERPAPI_API_KEY")
+            youtube_api_key = st.secrets.get("YOUTUBE_API_KEY")
+
+            if not serpapi_key or not youtube_api_key:
+                st.error("Please set your SERPAPI_API_KEY and YOUTUBE_API_KEY in Streamlit secrets.")
+            else:
+                st.subheader("Google Search Results on Trusted Websites")
+                for site in websites:
+                    st.markdown(f"### Results from {site}")
+                    results = serpapi_site_search(topic, site, serpapi_key)
+                    if results:
+                        for r in results[:5]:
+                            st.markdown(f"**[{r['title']}]({r['link']})**")
+                            st.write(r.get("snippet", ""))
+                    else:
+                        st.write("No results found.")
+
+                st.subheader("General Google Search Results")
+                general_results = serpapi_general_search(topic, serpapi_key)
+                if general_results:
+                    for r in general_results[:5]:
+                        st.markdown(f"**[{r['title']}]({r['link']})**")
+                        st.write(r.get("snippet", ""))
+                else:
+                    st.write("No results found.")
+
+                st.subheader("YouTube Video Search on Specified Channels")
+                for channel_id in youtube_channels:
+                    # If URL format, you might need to extract channel ID, here assumed to be ID directly
+                    st.markdown(f"#### Videos from Channel {channel_id}")
+                    videos = youtube_search_channel(topic, channel_id, youtube_api_key)
+                    if videos:
+                        for v in videos:
+                            vid_id = v['id']['videoId']
+                            title = v['snippet']['title']
+                            desc = v['snippet']['description']
+                            url = f"https://www.youtube.com/watch?v={vid_id}"
+                            st.markdown(f"[{title}]({url})")
+                            st.write(desc)
+                    else:
+                        st.write("No videos found.")
+
+                st.subheader("General YouTube Video Search")
+                general_videos = youtube_general_search(topic, youtube_api_key)
+                if general_videos:
+                    for v in general_videos:
+                        vid_id = v['id']['videoId']
+                        title = v['snippet']['title']
+                        desc = v['snippet']['description']
+                        url = f"https://www.youtube.com/watch?v={vid_id}"
+                        st.markdown(f"[{title}]({url})")
+                        st.write(desc)
+                else:
+                    st.write("No videos found.")
+
+    '''
     st.header("Web and YouTube Search")
     query = st.text_input("Enter search topic")
 
@@ -579,3 +545,4 @@ with tab4:
                     st_player(f"https://www.youtube.com/watch?v={vid_id}")
         else:
             st.error("Failed to perform YouTube search.")
+    '''

@@ -446,68 +446,144 @@ def youtube_general_search(query, youtube_api_key):
         st.error(f"YouTube general search failed: {res.text}")
         return []
 
+import gspread
+import requests
+import streamlit as st
+from streamlit_player import st_player
+from google.oauth2 import service_account
+
+# Assume credentials already created for Google Sheets access
+creds_dict = dict(st.secrets["google_service_account"])
+creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
+scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
+gc = gspread.authorize(credentials)
+
+
+def get_website_list(sheet_url):
+    try:
+        sh = gc.open_by_url(sheet_url)
+        ws = sh.worksheet("Website Links")  # Exact sheet tab name
+        sites = ws.col_values(1)
+        return [s.strip() for s in sites if s.strip() and not s.lower().startswith("website")]
+    except gspread.exceptions.WorksheetNotFound:
+        st.error("Worksheet 'Website Links' not found.")
+        return []
+    except Exception as e:
+        st.error(f"Error reading Website Links sheet: {e}")
+        return []
+
+def get_youtube_channels(sheet_url):
+    try:
+        sh = gc.open_by_url(sheet_url)
+        ws = sh.worksheet("youtube")  # Exact sheet tab name
+        channels = ws.col_values(1)
+        return [c.strip() for c in channels if c.strip() and not c.lower().startswith("channel")]
+    except gspread.exceptions.WorksheetNotFound:
+        st.error("Worksheet 'youtube' not found.")
+        return []
+    except Exception as e:
+        st.error(f"Error reading youtube sheet: {e}")
+        return []
+
+def serpapi_site_search(query, site, api_key):
+    search_query = f"site:{site} {query}"
+    params = {"q": search_query, "api_key": api_key}
+    url = "https://serpapi.com/search.json"
+    res = requests.get(url, params=params)
+    if res.ok:
+        return res.json().get("organic_results", [])
+    else:
+        st.error(f"SerpAPI search failed for {site}: {res.text}")
+        return []
+
+def serpapi_general_search(query, api_key):
+    params = {"q": query, "api_key": api_key}
+    res = requests.get("https://serpapi.com/search.json", params=params)
+    if res.ok:
+        return res.json().get("organic_results", [])
+    else:
+        st.error(f"SerpAPI general search failed: {res.text}")
+        return []
+
+def youtube_search_channel(query, channel_id, youtube_api_key):
+    params = {
+        "part": "snippet",
+        "channelId": channel_id,
+        "q": query,
+        "maxResults": 5,
+        "type": "video",
+        "key": youtube_api_key
+    }
+    res = requests.get("https://www.googleapis.com/youtube/v3/search", params=params)
+    if res.ok:
+        return res.json().get("items", [])
+    else:
+        st.error(f"YouTube search failed for channel {channel_id}: {res.text}")
+        return []
+
+def youtube_general_search(query, youtube_api_key):
+    params = {
+        "part": "snippet",
+        "q": query,
+        "maxResults": 5,
+        "type": "video",
+        "key": youtube_api_key
+    }
+    res = requests.get("https://www.googleapis.com/youtube/v3/search", params=params)
+    if res.ok:
+        return res.json().get("items", [])
+    else:
+        st.error(f"YouTube general search failed: {res.text}")
+        return []
+
 with tab4:
-    st.header("Web and YouTube Search for Students")
+    st.header("Search Trusted Websites & YouTube Channels")
 
-    sheet_url = st.text_input("Enter Google Sheet URL with Website and YouTube Channels data",
-                              value=st.session_state.get('quiz_sheet_url', ''))
-    topic = st.text_input("Enter topic or keyword to search")
+    sheet_url = st.text_input("Enter Google Sheet URL with Website & YouTube Lists")
+    if st.button("Submit Sheet URL"):
+        st.session_state['sheet_url'] = sheet_url
+        st.success("Sheet URL saved. Enter search topic below.")
 
-    if st.button("Search All"):
-        if not sheet_url or not topic:
-            st.warning("Please enter both Sheet URL and search topic.")
+    saved_sheet_url = st.session_state.get('sheet_url')
+    topic = st.text_input("Enter search topic or keyword")
+
+    if st.button("Search") and saved_sheet_url and topic:
+        websites = get_website_list(saved_sheet_url)
+        youtube_channels = get_youtube_channels(saved_sheet_url)
+
+        serpapi_key = st.secrets.get("SERPAPI_API_KEY")
+        youtube_api_key = st.secrets.get("YOUTUBE_API_KEY")
+
+        if not serpapi_key or not youtube_api_key:
+            st.error("Please set SERPAPI_API_KEY and YOUTUBE_API_KEY in Streamlit secrets.")
         else:
-            # Load lists once
-            with st.spinner("Loading websites and channels from sheet..."):
-                websites = get_website_list(sheet_url)
-                youtube_channels = get_youtube_channels(sheet_url)
-
-            serpapi_key = st.secrets.get("SERPAPI_API_KEY")
-            youtube_api_key = st.secrets.get("YOUTUBE_API_KEY")
-
-            if not serpapi_key or not youtube_api_key:
-                st.error("Please set your SERPAPI_API_KEY and YOUTUBE_API_KEY in Streamlit secrets.")
-            else:
-                st.subheader("Google Search Results on Trusted Websites")
-                for site in websites:
-                    st.markdown(f"### Results from {site}")
-                    results = serpapi_site_search(topic, site, serpapi_key)
-                    if results:
-                        for r in results[:5]:
-                            st.markdown(f"**[{r['title']}]({r['link']})**")
-                            st.write(r.get("snippet", ""))
-                    else:
-                        st.write("No results found.")
-
-                st.subheader("General Google Search Results")
-                general_results = serpapi_general_search(topic, serpapi_key)
-                if general_results:
-                    for r in general_results[:5]:
+            st.subheader("Google Search Results (Restricted to Trusted Sites)")
+            for site in websites:
+                st.markdown(f"### Results from {site}")
+                results = serpapi_site_search(topic, site, serpapi_key)
+                if results:
+                    for r in results[:5]:
                         st.markdown(f"**[{r['title']}]({r['link']})**")
-                        st.write(r.get("snippet", ""))
+                        st.write(r.get('snippet', ''))
                 else:
                     st.write("No results found.")
 
-                st.subheader("YouTube Video Search on Specified Channels")
-                for channel_id in youtube_channels:
-                    # If URL format, you might need to extract channel ID, here assumed to be ID directly
-                    st.markdown(f"#### Videos from Channel {channel_id}")
-                    videos = youtube_search_channel(topic, channel_id, youtube_api_key)
-                    if videos:
-                        for v in videos:
-                            vid_id = v['id']['videoId']
-                            title = v['snippet']['title']
-                            desc = v['snippet']['description']
-                            url = f"https://www.youtube.com/watch?v={vid_id}"
-                            st.markdown(f"[{title}]({url})")
-                            st.write(desc)
-                    else:
-                        st.write("No videos found.")
+            st.subheader("General Google Search Results")
+            general_results = serpapi_general_search(topic, serpapi_key)
+            if general_results:
+                for r in general_results[:5]:
+                    st.markdown(f"**[{r['title']}]({r['link']})**")
+                    st.write(r.get('snippet', ''))
+            else:
+                st.write("No results found.")
 
-                st.subheader("General YouTube Video Search")
-                general_videos = youtube_general_search(topic, youtube_api_key)
-                if general_videos:
-                    for v in general_videos:
+            st.subheader("YouTube Video Search on Listed Channels")
+            for channel_id in youtube_channels:
+                st.markdown(f"#### Videos from Channel {channel_id}")
+                videos = youtube_search_channel(topic, channel_id, youtube_api_key)
+                if videos:
+                    for v in videos:
                         vid_id = v['id']['videoId']
                         title = v['snippet']['title']
                         desc = v['snippet']['description']
@@ -516,6 +592,19 @@ with tab4:
                         st.write(desc)
                 else:
                     st.write("No videos found.")
+
+            st.subheader("General YouTube Video Search")
+            general_videos = youtube_general_search(topic, youtube_api_key)
+            if general_videos:
+                for v in general_videos:
+                    vid_id = v['id']['videoId']
+                    title = v['snippet']['title']
+                    desc = v['snippet']['description']
+                    url = f"https://www.youtube.com/watch?v={vid_id}"
+                    st.markdown(f"[{title}]({url})")
+                    st.write(desc)
+            else:
+                st.write("No videos found.")
 
     '''
     st.header("Web and YouTube Search")

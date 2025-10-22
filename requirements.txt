@@ -6,4 +6,3 @@ gspread
 oauth2client
 requests
 streamlit-player
-sqlite3  # Note: built in with Python, do not install separately

@@ -166,73 +166,122 @@ with tab2:
             st.error(f"Failed to load quiz: {e}")
 
 # --- Tab 3: RAG Ask ---
+import os
+
+# Helper to load FAISS index with safety
+def load_faiss_index():
+    return FAISS.load_local(
+        "faiss_index",
+        FastEmbedEmbeddings(),
+        allow_dangerous_deserialization=True
+    )
+
+# Function to extract slide text from Google Slides (placeholder)
+def extract_slide_texts(slides_url):
+    # Implement real extraction via Google Slides API for production
+    # For demo, dummy slide texts
+    return [
+        "Slide 1: Introduction to Deep Learning. Neural networks are inspired by the human brain.",
+        "Slide 2: Convolutional Neural Networks (CNNs) are used in image recognition.",
+        "Slide 3: Recurrent Neural Networks handle sequential data like language.",
+        # Add more slides here...
+    ]
+
 with tab3:
-    st.header("RAG Question Answering (GROQ + FastEmbed) - Expert Topic Explanation")
+    st.header("RAG Question Answering based on PPT Slides")
 
-    # Text input for question
-    question = st.text_area("Enter your question about the slides")
-    slide_number = st.number_input("Relevant Slide Number (optional)", min_value=1, value=1)
+    slide_num = st.number_input("Enter slide number (to reference)", min_value=1, max_value=100)
+    question = st.text_area("Ask your question about slide content")
 
-    # Initialize chat history in session state
-    if 'chat_history' not in st.session_state:
-        st.session_state['chat_history'] = []
+    slide_url_input = st.text_input(
+        "Enter PPT Slides URL for reference",
+        value=st.session_state.get('slide_url', '')
+    )
 
-    if st.button("Get Answer"):
+    if slide_url_input:
+        st.session_state['slide_url'] = slide_url_input
+
+    # Display the embedded slide deck like Tab 1
+    if slide_url_input:
+        embed_url = slide_url_input.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
+        st.components.v1.iframe(embed_url, height=480)
+    else:
+        st.info("Enter the Google Slides URL above to embed the presentation here.")
+
+    # Show selected slide text content
+    selected_slide_text = ""
+    if slide_url_input:
+        all_slides_texts = extract_slide_texts(slide_url_input)
+        slide_idx = slide_num - 1
+        if 0 <= slide_idx < len(all_slides_texts):
+            selected_slide_text = all_slides_texts[slide_idx]
+            st.subheader(f"Content of Slide {slide_num}")
+            st.text_area("Slide content as reference", value=selected_slide_text, height=180)
+        else:
+            st.warning("Slide number exceeds total slides or invalid.")
+
+    # RAG Q&A logic
+    if st.button("Ask on Selected Slide Content"):
         if not question.strip():
-            st.warning("Please enter a question to get an answer.")
+            st.warning("Please enter a question.")
+        elif not selected_slide_text:
+            st.warning("Select a valid slide number and ensure slide content is loaded.")
         else:
             try:
-                # Load vectorstore safely
-                vectorstore = FAISS.load_local(
-                    "faiss_index",
-                    FastEmbedEmbeddings(),
-                    allow_dangerous_deserialization=True
-                )
+                # Load or build FAISS index from full slide texts
+                if os.path.exists("faiss_index/index.faiss"):
+                    vectorstore = load_faiss_index()
+                else:
+                    # Build index on all slide texts
+                    vectorstore = FAISS.from_texts(all_slides_texts, FastEmbedEmbeddings())
+                    vectorstore.save_local("faiss_index")
+
                 retriever = vectorstore.as_retriever()
 
-                # Retrieve relevant context for the question
-                contexts = retriever.get_relevant_documents(question)
-                combined_context = "\n".join([doc.page_content for doc in contexts])
+                prompt_template = """
+You are an expert explaining concepts based on the following slide content.
+Use the context to answer the question clearly and simply.
 
-                # Enhanced prompt for clear explanations (avoiding fabrication)
-                template = """
-                You are an expert teaching assistant. Use the following context extracted from the presentation slides to provide a clear, easy-to-understand explanation responding to the question.
-                Explain core concepts effectively and simply so students can grasp them.
+Context:
+{context}
 
-                Context:
-                {context}
+Question:
+{question}
 
-                Question:
-                {question}
-
-                Please answer clearly and comprehensively:
-                """
-
-                prompt = ChatPromptTemplate.from_template(template)
-
-                # Configure GROQ Llama model with 70B versatile model
+Explain in an understandable way suitable for students.
+"""
+                prompt = ChatPromptTemplate.from_template(prompt_template)
                 llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
 
-                # Build the RAG chain with input retriever + prompt + model
-                rag_chain = (
-                    {"context": combined_context, "question": RunnablePassthrough()}
+                chain = (
+                    {"context": retriever, "question": RunnablePassthrough()}
                     | prompt
                     | llm
                     | StrOutputParser()
                 )
 
-                answer = rag_chain.invoke({"context": combined_context, "question": question})
+                answer = chain.invoke({
+                    "context": selected_slide_text,
+                    "question": question
+                })
 
-                # Save to chat history
-                st.session_state.chat_history.append({"question": question, "answer": answer})
+                # Store chat history in session state
+                if 'chat_logs' not in st.session_state:
+                    st.session_state['chat_logs'] = []
+                st.session_state['chat_logs'].append({"question": question, "answer": answer})
+
+                st.markdown(f"**Q:** {question}")
+                st.markdown(f"**A:** {answer}")
 
             except Exception as e:
                 st.error(f"Error in RAG processing: {e}")
 
-    # Display chat history as a chatbot interface
-    for entry in reversed(st.session_state.chat_history):
-        st.markdown(f"**Q:** {entry['question']}")
-        st.markdown(f"**A:** {entry['answer']}")
+    # Render chat history (most recent first)
+    if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
+        st.subheader("Previous Questions and Answers")
+        for entry in reversed(st.session_state['chat_logs']):
+            st.markdown(f"**Q:** {entry['question']}")
+            st.markdown(f"**A:** {entry['answer']}")
 
 # --- Tab 4: Web & YouTube Search ---
 with tab4:

@@ -85,58 +85,77 @@ with tab2:
         st.info("Please submit a Google Quiz Sheet URL in the Configuration tab.")
     else:
         try:
-            # Open the spreadsheet
+            # Open Google Sheet and get list of worksheets
             sh = gc.open_by_url(quiz_sheet_url)
-
-            # Get the list of worksheet (tab) names
             sheet_names = [ws.title for ws in sh.worksheets()]
             selected_sheet = st.selectbox("Select Quiz Sheet", sheet_names)
 
-            # Load the selected worksheet
             ws = sh.worksheet(selected_sheet)
             quiz_df = pd.DataFrame(ws.get_all_records())
 
-            # Initialize session state for question index
-            if 'question_index' not in st.session_state:
-                st.session_state['question_index'] = 0
-
             total_questions = len(quiz_df)
-            q_idx = st.session_state['question_index']
 
             if total_questions == 0:
                 st.warning("Selected quiz sheet is empty.")
             else:
-                # Show current question
+                # Initialize session state variables
+                if 'question_index' not in st.session_state:
+                    st.session_state['question_index'] = 0
+                if 'answer_submitted' not in st.session_state:
+                    st.session_state['answer_submitted'] = False
+                    st.session_state['user_answer'] = None
+
+                q_idx = st.session_state['question_index']
                 question = quiz_df.iloc[q_idx]
+
                 st.write(f"Question {q_idx + 1} of {total_questions}:")
                 st.write(question['Questions'])
 
-                # Display options
+                # Gather options
                 options = [question.get(f'Option {c}') for c in ['A','B','C','D','E'] if question.get(f'Option {c}')]
-                user_answer = st.radio("Choose your answer:", options, key=f"q_{q_idx}")
-
-                submitted = st.button("Submit Answer")
-
-                if submitted:
+                
+                if not st.session_state['answer_submitted']:
+                    user_answer = st.radio("Choose your answer:", options, key=f"q_{q_idx}")
+                    submit = st.button("Submit Answer")
+                    if submit:
+                        st.session_state['user_answer'] = user_answer
+                        st.session_state['answer_submitted'] = True
+                        st.experimental_rerun()
+                else:
                     correct_answer = question['Answer']
-                    if user_answer == correct_answer:
+                    if st.session_state['user_answer'] == correct_answer:
                         st.success("Correct!")
                     else:
                         st.error(f"Incorrect. Correct answer is: {correct_answer}")
 
                     st.markdown(f"**Explanation:** {question.get('Explanation', 'No explanation provided.')}")
 
-                    # Next question button
+                    # Navigation buttons
                     if q_idx + 1 < total_questions:
                         if st.button("Next Question"):
                             st.session_state['question_index'] += 1
+                            st.session_state['answer_submitted'] = False
+                            st.session_state['user_answer'] = None
                             st.experimental_rerun()
                     else:
                         st.success("You have completed the quiz!")
-                        # Reset quiz index for a new run
                         if st.button("Restart Quiz"):
                             st.session_state['question_index'] = 0
+                            st.session_state['answer_submitted'] = False
+                            st.session_state['user_answer'] = None
                             st.experimental_rerun()
+
+                # Optional: Save quiz performance on demand
+                student_name = st.text_input("Student Name")
+                if st.button("Save Quiz Performance") and student_name:
+                    correct_count = sum(quiz_df['Answer'] == st.session_state.get('user_answer'))
+                    wrong_count = total_questions - correct_count
+                    c.execute(
+                        'INSERT INTO performance (student, quiz_name, correct, wrong) VALUES (?, ?, ?, ?)',
+                        (student_name, selected_sheet, correct_count, wrong_count)
+                    )
+                    conn.commit()
+                    st.success("Quiz performance saved!")
 
         except Exception as e:
             st.error(f"Failed to load quiz: {e}")

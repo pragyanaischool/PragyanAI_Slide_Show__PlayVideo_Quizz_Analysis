@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import requests
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
 import gspread
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
@@ -11,13 +11,15 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-# --- Fix multiline private_key from secrets ---
+# --- Load credentials with correct OAuth scopes ---
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+
 creds_dict = dict(st.secrets["google_service_account"])
 creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
-credentials = Credentials.from_service_account_info(creds_dict)
+credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 gc = gspread.authorize(credentials)
 
-# --- Setup SQLite DB for quiz results ---
+# --- SQLite DB ---
 conn = sqlite3.connect('student_perf.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''
@@ -29,7 +31,7 @@ CREATE TABLE IF NOT EXISTS performance (
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)
 ''')
 
-# --- Default URLs from user input ---
+# --- Default sample URLs ---
 DEFAULT_SLIDES_URL = "https://docs.google.com/presentation/d/1fAkBtQJQgPFfUXK22rFzLuGhv05MViLg/edit"
 DEFAULT_QUIZ_SHEET_URL = "https://docs.google.com/spreadsheets/d/184z7lY3kkMBZ2GA8R_Q7WniZ4EHWC2umcse4yzQHMjw/edit"
 DEFAULT_VIDEO_URL = "https://www.youtube.com/watch?v=-nQRj_MOKa8&t=6s"
@@ -47,7 +49,7 @@ with st.form("config_form"):
         st.session_state['slides_url'] = slides_url
         st.session_state['quiz_sheet_url'] = quiz_sheet_url
         st.session_state['video_url'] = video_url
-        st.success("URLs saved! Navigate across tabs below.")
+        st.success("URLs saved successfully! Navigate to other tabs.")
 
 # --- Tabs ---
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -62,17 +64,17 @@ with tab1:
         embed_url = slides_url.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
         st.components.v1.iframe(embed_url, height=480)
     else:
-        st.info("Please submit a valid Google Slides URL in the Configuration tab.")
+        st.info("Please submit the Google Slides URL in the Configuration tab.")
 
     video_url = st.session_state.get('video_url')
     if video_url:
         try:
             from streamlit_player import st_player
             st_player(video_url)
-        except Exception:
+        except:
             st.video(video_url)
     else:
-        st.info("Please submit a video URL in the Configuration tab.")
+        st.info("Please submit the video URL in the Configuration tab.")
 
 # --- Tab 2: Quiz ---
 with tab2:
@@ -80,7 +82,7 @@ with tab2:
     quiz_sheet_url = st.session_state.get('quiz_sheet_url')
 
     if not quiz_sheet_url:
-        st.info("Please submit a Google Quiz Sheet URL in the Configuration tab.")
+        st.info("Please submit the Google Quiz Sheet URL in the Configuration tab.")
     else:
         try:
             sh = gc.open_by_url(quiz_sheet_url)
@@ -105,11 +107,11 @@ with tab2:
                         st.error(f"Incorrect. Correct answer: {row['Answer']}")
                         wrong += 1
 
-            if st.button("Save Results") and student_name:
+            if st.button("Save Quiz Results") and student_name:
                 c.execute('INSERT INTO performance (student, quiz_name, correct, wrong) VALUES (?, ?, ?, ?)',
                           (student_name, selected_quiz, correct, wrong))
                 conn.commit()
-                st.success("Quiz results saved!")
+                st.success("Results saved!")
 
             st.write(f"Your score: {correct} / {len(q_df)}")
 
@@ -129,10 +131,10 @@ with tab3:
             retriever = vectorstore.as_retriever()
 
             template = """
-                Use the following context to answer the question at the end.
-                If you don't know the answer, just say that you don't know. Don't make up an answer.
-                {context}
-                Question: {question}
+            Use the following pieces of context to answer the question at the end.
+            If you don't know the answer, just say that you don't know. Don't make up an answer.
+            {context}
+            Question: {question}
             """
             prompt = ChatPromptTemplate.from_template(template)
 

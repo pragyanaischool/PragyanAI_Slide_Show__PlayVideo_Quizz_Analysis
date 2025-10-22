@@ -2,12 +2,20 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import requests
+import json
+from google.oauth2.service_account import Credentials
+import gspread
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+
+# --- Streamlit Secrets JSON Access ---
+credentials_info = st.secrets["google_service_account"]
+credentials = Credentials.from_service_account_info(credentials_info)
+gc = gspread.authorize(credentials)
 
 # ----- Config -----
 slides_url = st.sidebar.text_input("Google Slides URL")
@@ -43,12 +51,6 @@ with tab1:
 # --- Tab 2: Quiz ---
 with tab2:
     st.header("Quiz from Google Sheets")
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    creds = ServiceAccountCredentials.from_json_keyfile_name('path_to_your_service_account.json', [
-        "https://www.googleapis.com/auth/spreadsheets.readonly"])
-    gc = gspread.authorize(creds)
 
     try:
         sh = gc.open_by_url(quiz_sheet_url)
@@ -80,7 +82,7 @@ with tab2:
     except Exception as e:
         st.error(str(e))
 
-# --- Tab 3: RAG with GROQ + Hugging Face embedding ---
+# --- Tab 3: RAG with GROQ + FastEmbed ---
 with tab3:
     st.header("Ask Question (RAG with GROQ+FastEmbed)")
 
@@ -141,4 +143,4 @@ with tab4:
                     st_player(f"https://www.youtube.com/watch?v={vid_id}")
         else:
             st.error("YouTube search failed")
-
+            

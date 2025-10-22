@@ -166,14 +166,20 @@ with tab2:
             st.error(f"Failed to load quiz: {e}")
 
 # --- Tab 3: RAG Ask ---
-'''
 with tab3:
     import os
     from urllib.parse import urlparse
     from googleapiclient.discovery import build
     from google.oauth2 import service_account
     from googleapiclient.errors import HttpError
+    from langchain_community.vectorstores import FAISS
+    from langchain_community.embeddings import FastEmbedEmbeddings
+    from langchain_groq import ChatGroq
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.runnables import RunnablePassthrough
+    from langchain_core.output_parsers import StrOutputParser
 
+    # Helper to get Google Slides presentation ID from URL
     def get_presentation_id(slides_url):
         path = urlparse(slides_url).path
         parts = path.split('/')
@@ -183,6 +189,7 @@ with tab3:
                 return parts[idx + 1]
         raise ValueError("Cannot extract Presentation ID from URL.")
 
+    # Extract slide texts via Google Slides API, with robust error handling
     def extract_slide_texts(slides_url):
         if 'slides_credentials' not in globals() or not globals()['slides_credentials']:
             st.error("Slides API credentials are not available. Cannot extract text.")
@@ -208,7 +215,7 @@ with tab3:
                             slide_text_parts.append(text_content.strip())
                 slide_content = " ".join(slide_text_parts).strip()
                 if slide_content:
-                    slide_texts.append(f"Slide content: {slide_content}")
+                    slide_texts.append(slide_content)
             return slide_texts
         except HttpError as e:
             if e.resp.status == 400 and "operation is not supported" in str(e).lower():
@@ -217,16 +224,17 @@ with tab3:
                     "This document format is not fully supported by the Google Slides API.\n"
                     "**Please try the following:**\n"
                     "1. Open the file in Google Slides.\n"
-                    "2. Go to `File` -> `Make a copy` to save it as a native Google Slides document.\n"
-                    "3. Use the URL of the new copy in the configuration."
+                    "2. Use `File > Make a copy` to create a native Google Slides document.\n"
+                    "3. Use the new presentation URL here."
                 )
             else:
-                st.error(f"Error extracting slide texts (HTTP Error {e.resp.status}). Check sharing settings. Error: {e}")
+                st.error(f"Error extracting slide texts (HTTP {e.resp.status}) - check sharing permissions.")
             return []
         except Exception as e:
-            st.error(f"An unexpected error occurred during slide extraction: {e}")
+            st.error(f"Unexpected error during slide extraction: {e}")
             return []
-    
+
+    # Load FAISS vectorstore safely
     def load_faiss_index():
         try:
             if os.path.exists("faiss_index/index.faiss"):
@@ -237,10 +245,10 @@ with tab3:
                 )
             return None
         except Exception as e:
-            st.error(f"Could not load FAISS index: {e}")
+            st.error(f"Error loading FAISS index: {e}")
             return None
 
-    # Initialize global slides_credentials once
+    # Initialize credentials globally once
     if 'slides_credentials' not in globals() or not globals()['slides_credentials']:
         creds_dict = dict(st.secrets["google_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
@@ -249,35 +257,29 @@ with tab3:
 
     st.header("RAG Question Answering based on PPT Slides")
 
+    # Input Google Slides URL, embed presentation
     slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slides_url', ''))
     if slide_url_input:
-        current_slide_url = st.session_state.get('slides_url')
-        if current_slide_url != slide_url_input:
+        current_url = st.session_state.get('slides_url')
+        if current_url != slide_url_input:
             st.session_state['slides_url'] = slide_url_input
             st.session_state['all_slides_texts'] = []
             st.session_state['faiss_ready'] = False
         embed_url = slide_url_input.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
         st.components.v1.iframe(embed_url, height=480)
     else:
-        st.info("Please enter Google Slides URL to embed presentation.")
+        st.info("Please enter Google Slides URL.")
 
+    # Extract slide texts if not loaded
     if slide_url_input and not st.session_state.get('all_slides_texts'):
         with st.spinner("Extracting slide texts..."):
             all_slides_texts = extract_slide_texts(slide_url_input)
             st.session_state['all_slides_texts'] = all_slides_texts
 
-    if st.session_state.get('all_slides_texts'):
-        st.subheader("Slides Text Content by Slide")
-        for idx, text in enumerate(st.session_state['all_slides_texts'], 1):
-            if text.strip():
-                st.markdown(f"### Slide {idx}")
-                st.write(text)
-    elif slide_url_input and not st.session_state.get('faiss_ready'):
-        st.warning("No slide text content extracted.")
-
+    # Show option to build/load vector DB first
     if st.button("Build or Load Vector DB (Required for Q&A)"):
-        if 'all_slides_texts' not in st.session_state or not st.session_state['all_slides_texts']:
-            st.error("Slide texts not available. Please enter a valid Google Slides URL.")
+        if not st.session_state.get('all_slides_texts'):
+            st.error("Slide texts unavailable. Please enter a valid Google Slides URL.")
         else:
             if not os.path.exists("faiss_index"):
                 os.makedirs("faiss_index")
@@ -287,26 +289,47 @@ with tab3:
                 st.session_state['faiss_ready'] = True
                 st.success("Vector DB built and saved.")
 
-    if not st.session_state.get('faiss_ready', False):
+    # Load vector DB from disk if not already loaded
+    if not st.session_state.get('faiss_ready'):
         if os.path.exists("faiss_index/index.faiss"):
             st.session_state['faiss_ready'] = True
             st.success("Loaded Vector DB from disk.")
 
+    # Slide number input to select slide for context window
+    all_slides_texts = st.session_state.get('all_slides_texts', [])
+    if all_slides_texts:
+        slide_num = st.number_input("Select slide number for Q&A context window", min_value=1, max_value=len(all_slides_texts), value=1)
+        slide_idx = slide_num - 1
+        indices = [slide_idx]
+        if slide_idx > 0:
+            indices.append(slide_idx - 1)
+        if slide_idx < len(all_slides_texts) -1:
+            indices.append(slide_idx + 1)
+        indices = sorted(indices)
+        context_slides = [all_slides_texts[i] for i in indices]
+        combined_context = "\n\n".join(context_slides)
+        st.subheader(f"Showing content from Slide {slide_num} and adjacent slides")
+        st.write(combined_context)
+    else:
+        combined_context = ""
+        st.info("Slide texts not loaded yet.")
+
+    # Question input and answer generation
     if st.session_state.get('faiss_ready', False):
-        st.markdown("---")
-        question = st.text_area("Ask a question based on the presentation slides")
+        question = st.text_area("Ask a question based on current and neighboring slides")
         if st.button("Get Answer"):
             if not question.strip():
                 st.warning("Please enter a question.")
+            elif not combined_context.strip():
+                st.warning("Selected slide context is empty.")
             else:
-                with st.spinner("Retrieving context and generating answer..."):
+                with st.spinner("Generating answer..."):
                     vectorstore = load_faiss_index()
                     if not vectorstore:
-                        st.error("Vector DB failed to load. Please try rebuilding.")
+                        st.error("Vector DB failed to load. Try rebuilding.")
                     else:
-                        retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
                         prompt_template = """
-You are an expert tutor. Use retrieved slide content context to answer clearly and simply:
+You are an expert tutor. Use the following context, which includes the selected slide and its adjacent slides, to answer the question clearly and simply for students.
 
 Context:
 {context}
@@ -314,19 +337,18 @@ Context:
 Question:
 {question}
 
-Answer with clarity for students.
+Answer with clarity and simplicity:
 """
                         prompt = ChatPromptTemplate.from_template(prompt_template)
                         llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
 
-                        chain = (
-                            {"context": retriever, "question": RunnablePassthrough()}
-                            | prompt
-                            | llm
-                            | StrOutputParser()
-                        )
+                        # Compose a chain that directly uses provided context and question
+                        chain = llm | StrOutputParser()
 
-                        answer = chain.invoke(question)
+                        answer = chain.invoke({
+                            "context": combined_context,
+                            "question": question
+                        })
 
                         if 'chat_logs' not in st.session_state:
                             st.session_state['chat_logs'] = []
@@ -335,6 +357,7 @@ Answer with clarity for students.
                         st.markdown(f"**Q:** {question}")
                         st.markdown(f"**A:** {answer}")
 
+    # Display chat history
     if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
         st.subheader("Previous Questions and Answers")
         for chat in reversed(st.session_state['chat_logs']):
@@ -520,7 +543,7 @@ Answer with clarity and simplicity:
             st.markdown(f"**Q:** {chat['question']}")
             st.markdown(f"**A:** {chat['answer']}")
 
-
+'''
 # --- Tab 4: Web & YouTube Search ---
 with tab4:
     st.header("Web and YouTube Search")

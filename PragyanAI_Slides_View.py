@@ -171,8 +171,13 @@ with tab3:
     from urllib.parse import urlparse
     from googleapiclient.discovery import build
     from google.oauth2 import service_account
-
+    from googleapiclient.errors import HttpError # Required for the specific error fix
+    
+    # NOTE: Functions assume 'st' and necessary LangChain/Google API components are imported globally.
+    # It also assumes 'slides_credentials' is globally initialized from st.secrets.
+    
     def get_presentation_id(slides_url):
+        """Extracts the presentation ID from the Google Slides URL."""
         path = urlparse(slides_url).path
         parts = path.split('/')
         if "d" in parts:
@@ -180,127 +185,189 @@ with tab3:
             if idx + 1 < len(parts):
                 return parts[idx + 1]
         raise ValueError("Cannot extract Presentation ID from URL.")
-
+    
     def extract_slide_texts(slides_url):
+        """
+        Extracts text content from Google Slides using the Slides API.
+        
+        FIX: Now includes robust error handling for the common 400 'operation not supported'
+        error, advising the user to create a native copy of the presentation.
+        """
+        # Assuming slides_credentials is a global variable initialized earlier in the script
+        if 'slides_credentials' not in globals() or not globals()['slides_credentials']:
+            st.error("Slides API credentials are not available. Cannot extract text.")
+            return []
+            
         try:
             presentation_id = get_presentation_id(slides_url)
-            creds_dict = dict(st.secrets["google_service_account"])
-            creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
-            scopes = ["https://www.googleapis.com/auth/presentations.readonly"]
-            credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
-            service = build('slides', 'v1', credentials=credentials)
+            service = build('slides', 'v1', credentials=globals()['slides_credentials'])
             presentation = service.presentations().get(presentationId=presentation_id).execute()
             slides = presentation.get('slides', [])
+            
             slide_texts = []
             for slide in slides:
-                slide_text = []
+                slide_text_parts = []
+                
                 for element in slide.get('pageElements', []):
                     shape = element.get('shape')
                     if shape and 'text' in shape:
+                        text_content = ""
                         for te in shape['text'].get('textElements', []):
                             if 'textRun' in te:
                                 content = te['textRun'].get('content')
                                 if content:
-                                    slide_text.append(content)
-                slide_content = ''.join(slide_text).strip()
-                slide_texts.append(slide_content)
+                                    text_content += content.strip() + " " 
+                        if text_content:
+                            slide_text_parts.append(text_content.strip())
+                
+                slide_content = " ".join(slide_text_parts).strip()
+                if slide_content:
+                    slide_texts.append(f"Slide content: {slide_content}")
+            
             return slide_texts
-        except Exception as e:
-            st.error(f"Error extracting slide texts: {e}")
+            
+        except HttpError as e:
+            # --- THE FIX FOR HTTP ERROR 400 ---
+            if e.resp.status == 400 and "operation is not supported" in str(e):
+                 st.error(
+                    f"Error extracting slide texts (400 - Operation Not Supported): "
+                    f"This document format is not fully supported by the Google Slides API. "
+                    f"**Please try the following:**\n"
+                    f"1. Open the file in Google Slides.\n"
+                    f"2. Go to `File` -> `Make a copy` to save it as a fresh, native Google Slides document.\n"
+                    f"3. Use the URL of the newly created copy in the Configuration Form."
+                )
+            else:
+                st.error(f"Error extracting slide texts (HTTP Error {e.resp.status}). Check sharing settings. Error: {e}")
             return []
-
+            
+        except Exception as e:
+            st.error(f"An unexpected error occurred during slide extraction: {e}")
+            return []
+    
+    
     def load_faiss_index():
+        """Loads the FAISS vector store from the local directory."""
         return FAISS.load_local(
             "faiss_index",
             FastEmbedEmbeddings(),
             allow_dangerous_deserialization=True
         )
-
+    
+    # --- Tab 3: RAG Ask Logic ---
+    
+    # Assuming this code is wrapped inside a 'with tab3:' block globally in the main script
+    
     st.header("RAG Question Answering based on PPT Slides")
-
+    
     # Input for Google Slides URL and embed presentation
+    # This uses the session state variable set in the configuration tab
     slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slides_url', ''))
+    
     if slide_url_input:
-        st.session_state['slides_url'] = slide_url_input
+        # Ensure session state is updated and embed the slides
+        current_slide_url = st.session_state.get('slides_url')
+        if current_slide_url != slide_url_input:
+             st.session_state['slides_url'] = slide_url_input
+             # Reset extracted texts if the URL changes
+             st.session_state['all_slides_texts'] = [] 
+             st.session_state['faiss_ready'] = False
+             
         embed_url = slide_url_input.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
         st.components.v1.iframe(embed_url, height=480)
     else:
         st.info("Please enter Google Slides URL to embed presentation.")
-
-    # Extract and show slide texts
-    if slide_url_input:
+    
+    # Extract and show slide texts (only run extraction if the texts aren't already loaded)
+    if slide_url_input and not st.session_state.get('all_slides_texts'):
         with st.spinner("Extracting slide texts..."):
             all_slides_texts = extract_slide_texts(slide_url_input)
-        if all_slides_texts:
-            st.subheader("Slides Text Content by Slide")
-            for idx, text in enumerate(all_slides_texts, 1):
+            st.session_state['all_slides_texts'] = all_slides_texts
+    
+    all_slides_texts = st.session_state.get('all_slides_texts', [])
+    
+    if all_slides_texts:
+        st.subheader("Slides Text Content by Slide")
+        for idx, text in enumerate(all_slides_texts, 1):
+            if text.strip():
                 st.markdown(f"### Slide {idx}")
                 st.write(text)
-            st.session_state['all_slides_texts'] = all_slides_texts
-        else:
-            st.warning("No slide text content extracted.")
-
+    elif slide_url_input and not st.session_state.get('faiss_ready'):
+        # This warning will show only if the URL is present but texts are empty (and no API error was displayed)
+        st.warning("No slide text content extracted.")
+    
     # Button to build/load vector DB
     if st.button("Build or Load Vector DB (Required for Q&A)"):
         if 'all_slides_texts' not in st.session_state or not st.session_state['all_slides_texts']:
             st.error("Slide texts not available. Please enter a valid Google Slides URL.")
         else:
             st.info("Building vector DB from slide texts...")
+            if not os.path.exists("faiss_index"):
+                os.makedirs("faiss_index")
+                
             vectorstore = FAISS.from_texts(st.session_state['all_slides_texts'], FastEmbedEmbeddings())
             vectorstore.save_local("faiss_index")
             st.success("Vector DB built and saved.")
             st.session_state['faiss_ready'] = True
-
+    
     faiss_ready = st.session_state.get('faiss_ready', False)
+    
+    # Check disk for DB if not already loaded
     if not faiss_ready:
         if os.path.exists("faiss_index/index.faiss"):
             st.session_state['faiss_ready'] = True
             st.success("Loaded Vector DB from disk.")
-
+            faiss_ready = True # Update local variable for immediate use
+    
     # Question input and answer output
     if faiss_ready:
+        st.markdown("---")
         question = st.text_area("Ask a question based on the presentation slides")
         if st.button("Get Answer"):
             if not question.strip():
                 st.warning("Please enter a question.")
             else:
-                try:
-                    vectorstore = load_faiss_index()
-                    retriever = vectorstore.as_retriever()
-                    prompt_template = """
-You are an expert tutor. Use retrieved slide content context to answer clearly and simply:
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer with clarity for students.
-"""
-                    prompt = ChatPromptTemplate.from_template(prompt_template)
-                    llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
-
-                    chain = (
-                        {"context": retriever, "question": RunnablePassthrough()}
-                        | prompt
-                        | llm
-                        | StrOutputParser()
-                    )
-
-                    answer = chain.invoke({"context": question, "question": question})
-
-                    # Append chat to session state history
-                    if 'chat_logs' not in st.session_state:
-                        st.session_state['chat_logs'] = []
-                    st.session_state['chat_logs'].append({"question": question, "answer": answer})
-
-                    st.markdown(f"**Q:** {question}")
-                    st.markdown(f"**A:** {answer}")
-
-                except Exception as e:
-                    st.error(f"Error during RAG processing: {e}")
-
+                with st.spinner("Retrieving context and generating answer..."):
+                    try:
+                        vectorstore = load_faiss_index()
+                        if not vectorstore:
+                            st.error("Vector DB failed to load. Please try rebuilding.")
+                        else:
+                            retriever = vectorstore.as_retriever()
+                            prompt_template = """
+    You are an expert tutor. Use retrieved slide content context to answer clearly and simply:
+    
+    Context:
+    {context}
+    
+    Question:
+    {question}
+    
+    Answer with clarity for students.
+    """
+                            prompt = ChatPromptTemplate.from_template(prompt_template)
+                            llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+    
+                            chain = (
+                                {"context": retriever, "question": RunnablePassthrough()}
+                                | prompt
+                                | llm
+                                | StrOutputParser()
+                            )
+    
+                            answer = chain.invoke(question)
+    
+                            # Append chat to session state history
+                            if 'chat_logs' not in st.session_state:
+                                st.session_state['chat_logs'] = []
+                            st.session_state['chat_logs'].append({"question": question, "answer": answer})
+    
+                            st.markdown(f"**Q:** {question}")
+                            st.markdown(f"**A:** {answer}")
+    
+                    except Exception as e:
+                        st.error(f"Error during RAG processing: {e}")
+    
     # Chat history display
     if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
         st.subheader("Previous Questions and Answers")

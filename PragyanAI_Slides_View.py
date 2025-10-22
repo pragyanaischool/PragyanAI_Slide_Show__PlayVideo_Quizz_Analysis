@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnablePassthrough
 
 # --- Fix multiline private_key from secrets ---
 creds_dict = dict(st.secrets["google_service_account"])
+st.write(st.secrets)
 creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
 credentials = Credentials.from_service_account_info(creds_dict)
 gc = gspread.authorize(credentials)

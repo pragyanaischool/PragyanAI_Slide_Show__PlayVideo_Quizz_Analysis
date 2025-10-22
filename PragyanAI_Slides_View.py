@@ -166,7 +166,43 @@ with tab2:
             st.error(f"Failed to load quiz: {e}")
 
 # --- Tab 3: RAG Ask ---
+import re
 import os
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+
+# Function to extract slide texts via Google Slides API
+def extract_slide_texts(slides_url):
+    pattern = r"/presentation/d/([a-zA-Z0-9_-]+)"
+    match = re.search(pattern, slides_url)
+    if not match:
+        st.error("Invalid Google Slides URL.")
+        return []
+    presentation_id = match.group(1)
+
+    creds_dict = dict(st.secrets["google_service_account"])
+    creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
+    scopes = ["https://www.googleapis.com/auth/presentations.readonly"]
+    credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
+
+    service = build('slides', 'v1', credentials=credentials)
+    presentation = service.presentations().get(presentationId=presentation_id).execute()
+    slides = presentation.get('slides', [])
+
+    slide_texts = []
+    for slide in slides:
+        slide_text = []
+        for element in slide.get('pageElements', []):
+            shape = element.get('shape')
+            if shape and 'text' in shape:
+                for te in shape['text'].get('textElements', []):
+                    if 'textRun' in te:
+                        content = te['textRun'].get('content')
+                        if content:
+                            slide_text.append(content)
+        slide_content = ''.join(slide_text).strip()
+        slide_texts.append(slide_content)
+    return slide_texts
 
 def load_faiss_index():
     return FAISS.load_local(
@@ -175,49 +211,60 @@ def load_faiss_index():
         allow_dangerous_deserialization=True
     )
 
+
 with tab3:
     st.header("RAG Question Answering based on PPT Slides")
 
-    # Step 1: Provide PPT URL and embed presentation
     slide_url_input = st.text_input("Enter Google Slides URL", value=st.session_state.get('slide_url', ''))
     if slide_url_input:
         st.session_state['slide_url'] = slide_url_input
         embed_url = slide_url_input.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
         st.components.v1.iframe(embed_url, height=480)
     else:
-        st.info("Please enter Google Slides URL to embed presentation.")
+        st.info("Please enter Google Slides URL.")
 
-    # Step 2: Build / Load Vector DB button
-    build_db = st.button("Build or Load Vector DB from Presentation Content")
-    if build_db and slide_url_input:
-        st.info("Please build the vector DB externally with slide texts, then save to 'faiss_index' folder.")
-        # Optionally you can trigger vector store creation here in your real setup
-        # but excluded per your request.
-
-    faiss_ready = os.path.exists("faiss_index/index.faiss")
-
-    if faiss_ready:
-        st.success("Vector DB is ready and loaded.")
-    else:
-        st.warning("Vector DB not found. Please build it manually or use the button above.")
-
-    # Step 3: Select Slide Number for reference only
-    slide_num = st.number_input("Select slide number to refer to", min_value=1, max_value=100)
-
-    # Step 4: Ask a question and get answer
-    question = st.text_area("Ask a question about the presentation slides")
-
-    if st.button("Get Answer"):
-        if not question.strip():
-            st.warning("Please enter a question.")
-        elif not faiss_ready:
-            st.warning("Vector DB is not ready.")
+    # Display slide-wise content
+    if slide_url_input:
+        with st.spinner("Fetching slide texts..."):
+            all_slides_texts = extract_slide_texts(slide_url_input)
+        if all_slides_texts:
+            st.subheader("Slide Contents")
+            for i, content in enumerate(all_slides_texts, 1):
+                st.markdown(f"### Slide {i}")
+                st.write(content)
+            st.session_state['all_slides_texts'] = all_slides_texts
         else:
-            try:
-                vectorstore = load_faiss_index()
-                retriever = vectorstore.as_retriever()
+            st.warning("No slide text content found or failed to fetch.")
 
-                prompt_template = """
+    # Build/load vector DB button
+    build_db = st.button("Build or Load Vector DB from Slides (Required for Q&A)")
+    if build_db:
+        if 'all_slides_texts' not in st.session_state:
+            st.error("Slide texts not loaded. Enter valid Google Slides URL first.")
+        else:
+            st.info("Building vector DB from slides…")
+            vectorstore = FAISS.from_texts(st.session_state['all_slides_texts'], FastEmbedEmbeddings())
+            vectorstore.save_local("faiss_index")
+            st.success("Vector DB built and saved.")
+            st.session_state['faiss_ready'] = True
+
+    faiss_ready = st.session_state.get('faiss_ready', False)
+    if not faiss_ready:
+        if os.path.exists("faiss_index/index.faiss"):
+            st.session_state['faiss_ready'] = True
+            st.success("Vector DB loaded from disk.")
+
+    # Question answering section
+    if faiss_ready:
+        question = st.text_area("Ask a question based on the presentation slides")
+        if st.button("Get Answer"):
+            if not question.strip():
+                st.warning("Please enter a question.")
+            else:
+                try:
+                    vectorstore = load_faiss_index()
+                    retriever = vectorstore.as_retriever()
+                    prompt_template = """
 You are an expert explaining concepts based on context retrieved from slides.
 Use the context to answer the question clearly and simply.
 
@@ -229,39 +276,37 @@ Question:
 
 Explain understandably for students.
 """
-                prompt = ChatPromptTemplate.from_template(prompt_template)
-                llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+                    prompt = ChatPromptTemplate.from_template(prompt_template)
+                    llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
 
-                chain = (
-                    {"context": retriever, "question": RunnablePassthrough()}
-                    | prompt
-                    | llm
-                    | StrOutputParser()
-                )
+                    chain = (
+                        {"context": retriever, "question": RunnablePassthrough()}
+                        | prompt
+                        | llm
+                        | StrOutputParser()
+                    )
 
-                answer = chain.invoke({
-                    "context": question,
-                    "question": question
-                })
+                    answer = chain.invoke({
+                        "context": question,
+                        "question": question
+                    })
 
-                # Save Q&A to chat history
-                if 'chat_logs' not in st.session_state:
-                    st.session_state['chat_logs'] = []
-                st.session_state['chat_logs'].append({"question": question, "answer": answer})
+                    if 'chat_logs' not in st.session_state:
+                        st.session_state['chat_logs'] = []
+                    st.session_state['chat_logs'].append({"question": question, "answer": answer})
 
-                st.markdown(f"**Q:** {question}")
-                st.markdown(f"**A:** {answer}")
+                    st.markdown(f"**Q:** {question}")
+                    st.markdown(f"**A:** {answer}")
 
-            except Exception as e:
-                st.error(f"Error in RAG processing: {e}")
+                except Exception as e:
+                    st.error(f"Error in RAG processing: {e}")
 
-    # Step 5: Display chat history
+    # Show chat history
     if 'chat_logs' in st.session_state and st.session_state['chat_logs']:
         st.subheader("Previous Questions and Answers")
         for entry in reversed(st.session_state['chat_logs']):
             st.markdown(f"**Q:** {entry['question']}")
             st.markdown(f"**A:** {entry['answer']}")
-
 
 # --- Tab 4: Web & YouTube Search ---
 with tab4:

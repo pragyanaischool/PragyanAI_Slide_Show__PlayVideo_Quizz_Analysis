@@ -11,82 +11,127 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-# --- Fix multiline private_key from secrets ---
-#st.write(st.secrets)
+# --- Fix private_key newlines ---
 creds_dict = dict(st.secrets["google_service_account"])
-
 creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
 credentials = Credentials.from_service_account_info(creds_dict)
 gc = gspread.authorize(credentials)
 
-# ----- Config -----
-slides_url = st.sidebar.text_input("Google Slides URL")
-video_url = st.sidebar.text_input("YouTube/MP4 URL")
-quiz_sheet_url = st.sidebar.text_input("Google Sheet URL for Quizzes")
-
-# --- SQLite DB setup ---
+# --- SQLite DB ---
 conn = sqlite3.connect('student_perf.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''
 CREATE TABLE IF NOT EXISTS performance (
-    student TEXT, quiz_name TEXT, correct INTEGER, wrong INTEGER, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)
+    student TEXT,
+    quiz_name TEXT,
+    correct INTEGER,
+    wrong INTEGER,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)
 ''')
 
-# --- Streamlit Tabs ---
+# --- Configuration Input Section ---
+st.title("AI Seminar Platform Configuration")
+
+with st.form("config_form"):
+    slides_url = st.text_input("Google Slides URL", value=st.session_state.get('slides_url', ''))
+    quiz_sheet_url = st.text_input("Google Quiz Sheet URL", value=st.session_state.get('quiz_sheet_url', ''))
+    video_url = st.text_input("Video URL (YouTube or Drive)", value=st.session_state.get('video_url', ''))
+
+    access_help = st.expander("Google Drive Access Help")
+    access_help.markdown("""
+    - Ensure files are shared with your Google service account email.
+    - For Slides and Sheets, share with:  
+      `your-service-account-email@project.iam.gserviceaccount.com`  
+    - For videos, use public links or shared appropriately.
+    """)
+
+    submit_config = st.form_submit_button("Submit All URLs")
+
+if submit_config:
+    errors = []
+    if not slides_url or "drive.google.com" not in slides_url:
+        errors.append("Invalid or empty Google Slides URL.")
+    if not quiz_sheet_url or "drive.google.com" not in quiz_sheet_url:
+        errors.append("Invalid or empty Google Quiz Sheet URL.")
+    # Video URL can be YouTube or Drive, not strictly validated here
+
+    if errors:
+        st.error("Please fix errors in URLs:")
+        for err in errors:
+            st.write(f"- {err}")
+    else:
+        st.success("URLs submitted successfully!")
+        st.session_state['slides_url'] = slides_url
+        st.session_state['quiz_sheet_url'] = quiz_sheet_url
+        st.session_state['video_url'] = video_url
+
+# --- Tabs ---
 tab1, tab2, tab3, tab4 = st.tabs([
     "📑 PPT & Video", "📝 Quiz", "🤖 RAG Ask", "🌐 Web & YouTube"
 ])
 
-# --- Tab 1: Slide & Video ---
+# Tab 1: Slides and Video
 with tab1:
     st.header("Slides & Video")
-    if slides_url:
-        embed_url = slides_url.replace("/edit", "/embed?start=false&loop=false&delayms=3000")
+
+    if 'slides_url' in st.session_state and st.session_state['slides_url']:
+        embed_url = st.session_state['slides_url'].replace("/edit", "/embed?start=false&loop=false&delayms=3000")
         st.components.v1.iframe(embed_url, height=480)
-    if video_url:
+    else:
+        st.info("Please submit a valid Google Slides URL above.")
+
+    if 'video_url' in st.session_state and st.session_state['video_url']:
         try:
             from streamlit_player import st_player
-            st_player(video_url)
+            st_player(st.session_state['video_url'])
         except Exception:
-            st.video(video_url)
+            st.video(st.session_state['video_url'])
+    else:
+        st.info("Please submit a video URL above.")
 
-# --- Tab 2: Quiz ---
+# Tab 2: Quiz
 with tab2:
     st.header("Quiz from Google Sheets")
 
-    try:
-        sh = gc.open_by_url(quiz_sheet_url)
-        quiz_df = pd.DataFrame(sh.sheet1.get_all_records())
-        quiz_names = quiz_df['quiz_name'].unique()
-        selected_quiz = st.selectbox("Select Quiz", quiz_names)
-        q_df = quiz_df[quiz_df['quiz_name'] == selected_quiz]
+    if 'quiz_sheet_url' not in st.session_state or not st.session_state['quiz_sheet_url']:
+        st.info("Please submit a Google Quiz Sheet URL in the configuration tab above.")
+    else:
+        try:
+            sh = gc.open_by_url(st.session_state['quiz_sheet_url'])
+            quiz_df = pd.DataFrame(sh.sheet1.get_all_records())
+            quiz_names = quiz_df['quiz_name'].unique()
+            selected_quiz = st.selectbox("Select Quiz", quiz_names)
+            q_df = quiz_df[quiz_df['quiz_name'] == selected_quiz]
 
-        correct, wrong = 0, 0
-        student_name = st.text_input("Student Name", key='student')
-        for idx, q in q_df.iterrows():
-            st.write(f"Q{idx+1}: {q['Question']}")
-            options = [q[f'Option {c}'] for c in 'ABCDE' if q.get(f'Option {c}', None)]
-            answer = st.radio("Your answer:", options, key=f"q{idx}")
-            if st.button(f"Submit Question {idx+1}", key=f"sub{idx}"):
-                selected_opt = answer
-                correct_answer = q['Answer']
-                if selected_opt == correct_answer:
-                    st.success("Correct!")
-                    correct += 1
-                else:
-                    st.error(f"Wrong! Correct answer: {correct_answer}")
-                    wrong += 1
-        if st.button("Save Results") and student_name:
-            c.execute('INSERT INTO performance (student, quiz_name, correct, wrong) VALUES (?, ?, ?, ?)',
-                      (student_name, selected_quiz, correct, wrong))
-            conn.commit()
-            st.success("Results saved!")
+            student_name = st.text_input("Student Name")
 
-        st.write(f"Score: {correct}/{len(q_df)}")
-    except Exception as e:
-        st.error(f"Error loading quiz: {e}")
+            correct, wrong = 0, 0
+            for idx, q in q_df.iterrows():
+                st.write(f"Q{idx + 1}: {q['Question']}")
+                options = [q[f'Option {c}'] for c in 'ABCDE' if q.get(f'Option {c}', None)]
+                answer = st.radio("Your answer:", options, key=f"q{idx}")
+                if st.button(f"Submit Question {idx + 1}", key=f"sub{idx}"):
+                    if answer == q['Answer']:
+                        st.success("Correct!")
+                        correct += 1
+                    else:
+                        st.error(f"Wrong! Correct answer: {q['Answer']}")
+                        wrong += 1
 
-# --- Tab 3: RAG with GROQ + FastEmbed ---
+            if st.button("Save Quiz Results") and student_name:
+                c.execute(
+                    'INSERT INTO performance (student, quiz_name, correct, wrong) VALUES (?, ?, ?, ?)',
+                    (student_name, selected_quiz, correct, wrong)
+                )
+                conn.commit()
+                st.success("Results saved!")
+
+            st.write(f"Score: {correct} / {len(q_df)}")
+
+        except Exception as e:
+            st.error(f"Failed to load quiz: {e}")
+
+# Tab 3: RAG Ask
 with tab3:
     st.header("Ask Question (RAG with GROQ + FastEmbed)")
 
@@ -118,9 +163,9 @@ with tab3:
             answer = rag_chain.invoke({"context": question_text, "question": question_text})
             st.write("Answer:", answer)
         except Exception as e:
-            st.error(f"Error in RAG answer: {e}")
+            st.error(f"Error during RAG answer retrieval: {e}")
 
-# --- Tab 4: Web & YouTube Search ---
+# Tab 4: Search Web & YouTube
 with tab4:
     st.header("Web & YouTube Search")
     query = st.text_input("Search Topic")
@@ -137,8 +182,8 @@ with tab4:
         yt_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&key=YOUR_YOUTUBE_API_KEY&maxResults=2"
         resp = requests.get(yt_url)
         if resp.ok:
-            items = resp.json().get('items', [])
             from streamlit_player import st_player
+            items = resp.json().get('items', [])
             for video in items:
                 vid_id = video['id'].get('videoId')
                 if vid_id:

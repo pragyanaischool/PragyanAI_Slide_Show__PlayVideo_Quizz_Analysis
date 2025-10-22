@@ -82,41 +82,64 @@ with tab2:
     quiz_sheet_url = st.session_state.get('quiz_sheet_url')
 
     if not quiz_sheet_url:
-        st.info("Please submit the Google Quiz Sheet URL in the Configuration tab.")
+        st.info("Please submit a Google Quiz Sheet URL in the Configuration tab.")
     else:
         try:
+            # Open the spreadsheet
             sh = gc.open_by_url(quiz_sheet_url)
-            quiz_df = pd.DataFrame(sh.sheet1.get_all_records())
 
-            quiz_names = quiz_df['quiz_name'].unique()
-            selected_quiz = st.selectbox("Select Quiz", quiz_names)
-            q_df = quiz_df[quiz_df['quiz_name'] == selected_quiz]
+            # Get the list of worksheet (tab) names
+            sheet_names = [ws.title for ws in sh.worksheets()]
+            selected_sheet = st.selectbox("Select Quiz Sheet", sheet_names)
 
-            student_name = st.text_input("Enter Student Name")
+            # Load the selected worksheet
+            ws = sh.worksheet(selected_sheet)
+            quiz_df = pd.DataFrame(ws.get_all_records())
 
-            correct, wrong = 0, 0
-            for idx, row in q_df.iterrows():
-                st.write(f"Q{idx+1}: {row['Questions']}")
-                options = [row.get(f'Option {opt}', '') for opt in "ABCDE" if row.get(f'Option {opt}', '')]
-                answer = st.radio("Choose your answer:", options, key=f"q{idx}")
-                if st.button(f"Submit Question {idx+1}", key=f"submit_{idx}"):
-                    if answer == row['Answer']:
+            # Initialize session state for question index
+            if 'question_index' not in st.session_state:
+                st.session_state['question_index'] = 0
+
+            total_questions = len(quiz_df)
+            q_idx = st.session_state['question_index']
+
+            if total_questions == 0:
+                st.warning("Selected quiz sheet is empty.")
+            else:
+                # Show current question
+                question = quiz_df.iloc[q_idx]
+                st.write(f"Question {q_idx + 1} of {total_questions}:")
+                st.write(question['Questions'])
+
+                # Display options
+                options = [question.get(f'Option {c}') for c in ['A','B','C','D','E'] if question.get(f'Option {c}')]
+                user_answer = st.radio("Choose your answer:", options, key=f"q_{q_idx}")
+
+                submitted = st.button("Submit Answer")
+
+                if submitted:
+                    correct_answer = question['Answer']
+                    if user_answer == correct_answer:
                         st.success("Correct!")
-                        correct += 1
                     else:
-                        st.error(f"Incorrect. Correct answer: {row['Answer']}")
-                        wrong += 1
+                        st.error(f"Incorrect. Correct answer is: {correct_answer}")
 
-            if st.button("Save Quiz Results") and student_name:
-                c.execute('INSERT INTO performance (student, quiz_name, correct, wrong) VALUES (?, ?, ?, ?)',
-                          (student_name, selected_quiz, correct, wrong))
-                conn.commit()
-                st.success("Results saved!")
+                    st.markdown(f"**Explanation:** {question.get('Explanation', 'No explanation provided.')}")
 
-            st.write(f"Your score: {correct} / {len(q_df)}")
+                    # Next question button
+                    if q_idx + 1 < total_questions:
+                        if st.button("Next Question"):
+                            st.session_state['question_index'] += 1
+                            st.experimental_rerun()
+                    else:
+                        st.success("You have completed the quiz!")
+                        # Reset quiz index for a new run
+                        if st.button("Restart Quiz"):
+                            st.session_state['question_index'] = 0
+                            st.experimental_rerun()
 
         except Exception as e:
-            st.error(f"Failed to load quiz sheet: {e}")
+            st.error(f"Failed to load quiz: {e}")
 
 # --- Tab 3: RAG Ask ---
 with tab3:

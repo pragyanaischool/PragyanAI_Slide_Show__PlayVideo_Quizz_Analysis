@@ -167,37 +167,72 @@ with tab2:
 
 # --- Tab 3: RAG Ask ---
 with tab3:
-    st.header("RAG Question Answering (GROQ + FastEmbed)")
+    st.header("RAG Question Answering (GROQ + FastEmbed) - Expert Topic Explanation")
 
-    question = st.text_area("Enter your question")
+    # Text input for question
+    question = st.text_area("Enter your question about the slides")
     slide_number = st.number_input("Relevant Slide Number (optional)", min_value=1, value=1)
 
+    # Initialize chat history in session state
+    if 'chat_history' not in st.session_state:
+        st.session_state['chat_history'] = []
+
     if st.button("Get Answer"):
-        try:
-            vectorstore = FAISS.load_local("faiss_index", FastEmbedEmbeddings())
-            retriever = vectorstore.as_retriever()
+        if not question.strip():
+            st.warning("Please enter a question to get an answer.")
+        else:
+            try:
+                # Load vectorstore safely
+                vectorstore = FAISS.load_local(
+                    "faiss_index",
+                    FastEmbedEmbeddings(),
+                    allow_dangerous_deserialization=True
+                )
+                retriever = vectorstore.as_retriever()
 
-            template = """
-            Use the following pieces of context to answer the question at the end.
-            If you don't know the answer, just say that you don't know. Don't make up an answer.
-            {context}
-            Question: {question}
-            """
-            prompt = ChatPromptTemplate.from_template(template)
+                # Retrieve relevant context for the question
+                contexts = retriever.get_relevant_documents(question)
+                combined_context = "\n".join([doc.page_content for doc in contexts])
 
-            llm = ChatGroq(temperature=0, model_name="llama3-8b-8192")
+                # Enhanced prompt for clear explanations (avoiding fabrication)
+                template = """
+                You are an expert teaching assistant. Use the following context extracted from the presentation slides to provide a clear, easy-to-understand explanation responding to the question.
+                Explain core concepts effectively and simply so students can grasp them.
 
-            rag_chain = (
-                {"context": retriever, "question": RunnablePassthrough()}
-                | prompt
-                | llm
-                | StrOutputParser()
-            )
+                Context:
+                {context}
 
-            answer = rag_chain.invoke({"context": question, "question": question})
-            st.write("Answer:", answer)
-        except Exception as e:
-            st.error(f"Error in RAG processing: {e}")
+                Question:
+                {question}
+
+                Please answer clearly and comprehensively:
+                """
+
+                prompt = ChatPromptTemplate.from_template(template)
+
+                # Configure GROQ Llama model with 70B versatile model
+                llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
+
+                # Build the RAG chain with input retriever + prompt + model
+                rag_chain = (
+                    {"context": combined_context, "question": RunnablePassthrough()}
+                    | prompt
+                    | llm
+                    | StrOutputParser()
+                )
+
+                answer = rag_chain.invoke({"context": combined_context, "question": question})
+
+                # Save to chat history
+                st.session_state.chat_history.append({"question": question, "answer": answer})
+
+            except Exception as e:
+                st.error(f"Error in RAG processing: {e}")
+
+    # Display chat history as a chatbot interface
+    for entry in reversed(st.session_state.chat_history):
+        st.markdown(f"**Q:** {entry['question']}")
+        st.markdown(f"**A:** {entry['answer']}")
 
 # --- Tab 4: Web & YouTube Search ---
 with tab4:

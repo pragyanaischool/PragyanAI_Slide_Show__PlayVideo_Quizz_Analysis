@@ -12,7 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
 # --- Fix multiline private_key from secrets ---
-st.write(st.secrets)
+#st.write(st.secrets)
 creds_dict = dict(st.secrets["google_service_account"])
 
 creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')

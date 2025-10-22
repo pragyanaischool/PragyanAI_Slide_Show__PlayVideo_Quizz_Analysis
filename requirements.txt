@@ -10,3 +10,5 @@ langchain_community
 langchain_core
 streamlit_player
 faiss-cpu  # or faiss-gpu if applicable
+google-api-python-client
+google-auth

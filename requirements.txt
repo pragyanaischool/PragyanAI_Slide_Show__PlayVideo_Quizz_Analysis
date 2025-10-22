@@ -1,6 +1,6 @@
 streamlit
 pandas
-sqlite3  # builtin, no install needed
+# sqlite3  # builtin, no install needed
 gspread
 oauth2client
 requests
